@@ -1,0 +1,28 @@
+# Never publish: movies, subtitles, logs, personal settings and notes
+movies/
+log/
+handoff/
+*.mkv
+*.mp4
+*.m4v
+*.avi
+*.mov
+*.webm
+*.srt
+*.profmute.txt
+profmute_gui.json
+.private-terms.txt
+.claude/
+
+# Your own copies of the editable lists (the defaults live in profmute.py)
+words.txt
+models.txt
+
+# Built or downloaded, not source
+.venv/
+python/
+ffmpeg/
+dist/
+tools/
+ProfMute.exe
+__pycache__/
