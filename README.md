@@ -1,5 +1,9 @@
 # ProfMute
 
+**I could not find a free program that does this locally, on my own PC, so I made one.**
+
+**ProfMute was coded 100% by AI. I did not write any of the code myself.**
+
 ProfMute makes a copy of a movie with the profanity muted. It listens to the audio with
 [Whisper](https://github.com/openai/whisper) speech recognition, finds the words on your word list,
 and silences just those moments. The picture is not re-encoded, and your original file is never
