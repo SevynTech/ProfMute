@@ -1,4 +1,5 @@
-"""Build the shareable package:  dist\\ProfMute\\  and  dist\\ProfMute-<version>.zip
+"""Build what gets shared:  dist\\ProfMute\\ (the program folder), dist\\ProfMute-<version>.zip (that
+folder zipped) and dist\\ProfMute-Setup-<version>.exe (an installer for it; needs Inno Setup 6).
 
 Usage (from the project folder):  uv run python build_dist.py
 
@@ -31,6 +32,19 @@ def build_launcher():
         return print("  C# compiler not found, keeping the existing ProfMute.exe")
     subprocess.run([str(CSC), "/nologo", "/target:winexe", "/optimize", "/win32icon:profmute.ico",
                     "/r:System.Windows.Forms.dll", "/out:ProfMute.exe", r"launcher\ProfMute.cs"], cwd=HERE, check=True)
+
+
+def build_installer():
+    """dist\\ProfMute-Setup-<version>.exe, made by Inno Setup from the files in dist\\ProfMute."""
+    places = [Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe",
+              Path(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe"), Path(r"C:\Program Files\Inno Setup 6\ISCC.exe")]
+    iscc = next((p for p in places if p.is_file()), None) or shutil.which("ISCC")
+    if not iscc:
+        print("  Inno Setup not found, so no installer was built (winget install --id JRSoftware.InnoSetup -e)")
+        return None
+    subprocess.run([str(iscc), "/Qp", f"/DAppVersion={profmute.__version__}", str(HERE / "installer" / "ProfMute.iss")],
+                   check=True)
+    return DIST / f"ProfMute-Setup-{profmute.__version__}.exe"
 
 
 def private_terms():
@@ -82,6 +96,14 @@ def main():
     total = sum(p.stat().st_size for p in APP.rglob("*") if p.is_file())
     print(f"  {APP}  ({total / 1e6:.0f} MB, {sum(1 for p in APP.rglob('*') if p.is_file())} files)")
     print(f"  {archive}  ({archive.stat().st_size / 1e6:.0f} MB)")
+    installer = build_installer()
+    if installer:
+        data = installer.read_bytes().lower()
+        found = [t for t in private_terms() if t.lower().encode() in data or t.lower().encode("utf-16-le") in data]
+        if found:
+            installer.unlink()
+            sys.exit(f"NOT SHAREABLE - the installer contains {found}")
+        print(f"  {installer}  ({installer.stat().st_size / 1e6:.0f} MB)")
     print("  nothing personal found. Ready to share.")
 
 

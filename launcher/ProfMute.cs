@@ -2,6 +2,9 @@
 // profmute_gui.py with the Python environment in this folder (.venv), without a console window.
 // When that environment does not exist yet (first run on a new PC), it sets it up first.
 //
+// "ProfMute.exe --setup" only does that first-time download, without asking and without opening
+// the window. The installer uses it, so ProfMute is ready the first time it is opened.
+//
 // Rebuild (from the project folder, only needed after changing this file or the icon):
 //   uv run python build_dist.py
 // or by hand:
@@ -23,39 +26,58 @@ static class Launcher
     const string Title = "ProfMute";
 
     [STAThread]
-    static void Main()
+    static int Main(string[] args)
     {
         string dir = AppDomain.CurrentDomain.BaseDirectory;
         string python = Path.Combine(dir, ".venv", "Scripts", "pythonw.exe");
         string gui = Path.Combine(dir, "profmute_gui.py");
+        bool setupOnly = args.Length > 0 && args[0] == "--setup";
+        if (setupOnly)
+            return Ready(dir, python) || Setup(dir, python, false) ? 0 : 1;
         if (!File.Exists(gui))
         {
             MessageBox.Show("profmute_gui.py is missing.\n\nProfMute.exe has to stay in the ProfMute folder, next to it.",
                             Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
+            return 1;
         }
-        if (!File.Exists(python) && !Setup(dir, python))
-            return;
+        if (!Ready(dir, python) && !Setup(dir, python, true))
+            return 1;
         var start = new ProcessStartInfo(python, "\"" + gui + "\"");
         start.WorkingDirectory = dir;
         start.UseShellExecute = false;
         Process.Start(start);
+        return 0;
+    }
+
+    // Set up and complete? In a packaged copy (one that brings its own uv) a marker file says the
+    // download finished; without it a half-finished download would look like a working install.
+    static bool Ready(string dir, string python)
+    {
+        if (!File.Exists(python))
+            return false;
+        return File.Exists(Marker(dir)) || !File.Exists(Path.Combine(dir, "tools", "uv.exe"));
+    }
+
+    static string Marker(string dir)
+    {
+        return Path.Combine(dir, ".venv", "profmute-ready");
     }
 
     // First run: let uv download Python and the libraries into this folder.
-    static bool Setup(string dir, string python)
+    static bool Setup(string dir, string python, bool ask)
     {
         string uv = Path.Combine(dir, "tools", "uv.exe");
         if (!File.Exists(uv))
             uv = FindOnPath("uv.exe");
         if (uv == null)
         {
-            MessageBox.Show("ProfMute has not been set up yet, and the installer it uses (tools\\uv.exe) is missing.\n\n" +
-                            "Unzip the whole ProfMute folder again, or install uv from https://docs.astral.sh/uv/ and start ProfMute again.",
-                            Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (ask)
+                MessageBox.Show("ProfMute has not been set up yet, and the installer it uses (tools\\uv.exe) is missing.\n\n" +
+                                "Install ProfMute again, or install uv from https://docs.astral.sh/uv/ and start ProfMute again.",
+                                Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
-        if (MessageBox.Show("Welcome to ProfMute.\n\n" +
+        if (ask && MessageBox.Show("Welcome to ProfMute.\n\n" +
                             "Before its first run, ProfMute has to download Python and the speech recognition libraries " +
                             "into its own folder:\n\n" + dir + "\n\n" +
                             "That is about 2.2 GB and needs an internet connection. It takes several minutes and only happens once.\n\n" +
@@ -63,33 +85,46 @@ static class Launcher
                             Title + " - first-time setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
             return false;
 
-        // A console window shows uv's progress; it stays open only if something went wrong.
-        var setup = new ProcessStartInfo("cmd.exe",
-            "/s /c \"title ProfMute first-time setup & echo Downloading Python and the libraries, about 2.2 GB. " +
-            "This window closes by itself when it is done. & echo. & \"" + uv + "\" sync --frozen " +
-            "|| (echo. & echo Setup did not finish. Check your internet connection, then start ProfMute again. & pause)\"");
+        // Started by hand: a console window shows uv's progress, and stays open if something went
+        // wrong so the reason can be read. Under the installer: no window and no waiting for a key;
+        // what uv said goes to setup-log.txt instead.
+        var setup = new ProcessStartInfo("cmd.exe", ask
+            ? "/s /c \"title ProfMute setup & echo Downloading Python and the speech recognition libraries, about 2.2 GB. " +
+              "This window closes by itself when it is done. & echo. & \"" + uv + "\" sync --frozen || " +
+              "(echo. & echo Setup did not finish. Check your internet connection, then start ProfMute again. & pause & exit /b 1)\""
+            : "/s /c \"\"" + uv + "\" sync --frozen > setup-log.txt 2>&1\"");
         setup.WorkingDirectory = dir;
         setup.UseShellExecute = false;
+        setup.CreateNoWindow = !ask;
         setup.EnvironmentVariables["UV_PYTHON_INSTALL_DIR"] = Path.Combine(dir, "python");   // keep Python in this folder too
         setup.EnvironmentVariables["UV_PYTHON_PREFERENCE"] = "only-managed";
         setup.EnvironmentVariables["UV_NO_CACHE"] = "1";                                      // no second copy left on the PC
         setup.EnvironmentVariables["UV_LINK_MODE"] = "copy";
+        int code;
         try
         {
             using (Process p = Process.Start(setup))
+            {
                 p.WaitForExit();
+                code = p.ExitCode;
+            }
         }
         catch (Exception e)
         {
-            MessageBox.Show("Setup could not be started:\n\n" + e.Message, Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (ask)
+                MessageBox.Show("Setup could not be started:\n\n" + e.Message, Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
             return false;
         }
-        if (File.Exists(python))
+        if (code == 0 && File.Exists(python))
+        {
+            File.WriteAllText(Marker(dir), "The first-time download finished. Delete the .venv folder to do it again.\r\n");
             return true;
-        MessageBox.Show("Setup did not finish, so ProfMute cannot start yet.\n\n" +
-                        "Check your internet connection and that this folder can be written to " +
-                        "(not inside Program Files), then start ProfMute again.",
-                        Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        if (ask)
+            MessageBox.Show("Setup did not finish, so ProfMute cannot start yet.\n\n" +
+                            "Check your internet connection and that this folder can be written to " +
+                            "(not inside Program Files), then start ProfMute again.",
+                            Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
         return false;
     }
 

@@ -23,20 +23,24 @@ Everything runs on your own PC. Nothing about your movies is sent anywhere.
 
 ## Install
 
-1. Download `ProfMute-1.0.0.zip` from the
-   [latest release](https://github.com/SevynTech/ProfMute/releases/latest) and unzip the
-   `ProfMute` folder somewhere you can write to, such as `Documents`. Do not put it in
-   `Program Files`.
-2. Double-click `ProfMute.exe`.
-3. The first time, it asks to download Python and the speech recognition libraries (about 2.2 GB)
-   into the ProfMute folder. Say yes and wait for the black window to close. This happens once.
+Both downloads are on the [latest release](https://github.com/SevynTech/ProfMute/releases/latest).
 
-Windows may show "Windows protected your PC" because the launcher is not signed. Choose
-**More info**, then **Run anyway**. If you would rather not run the exe at all, open a terminal in
-the ProfMute folder and run `tools\uv.exe run python profmute_gui.py` instead.
+**With the installer (easiest).** Download `ProfMute-Setup-1.0.0.exe` and run it. It installs for
+your Windows account only, so it needs no administrator rights. Its last step downloads Python and
+the speech recognition libraries (about 2.2 GB), which takes a few minutes. ProfMute is then in the
+Start menu. To remove it, use Windows Settings > Apps > Installed apps.
 
-To remove ProfMute, delete its folder. The speech models are stored separately, in
-`%USERPROFILE%\.cache\huggingface`.
+**From the zip (nothing is installed).** Download `ProfMute-1.0.0.zip`, unzip the `ProfMute`
+folder somewhere you can write to, such as `Documents` (not `Program Files`), and double-click
+`ProfMute.exe`. The first time, it asks to download the same 2.2 GB into that folder. To remove
+it, delete the folder.
+
+Windows may show "Windows protected your PC" because neither file is signed. Choose **More info**,
+then **Run anyway**. If you would rather not run an exe at all, unzip the zip, open a terminal in
+the ProfMute folder and run `tools\uv.exe run python profmute_gui.py`.
+
+Removing ProfMute leaves two things behind on purpose: its `log` folder, if you used the default
+one, and the speech models, which are stored in `%USERPROFILE%\.cache\huggingface`.
 
 ## Using it
 
@@ -169,14 +173,16 @@ uv sync
 uv run python profmute_gui.py
 ```
 
-The release zip is assembled by `build_dist.py`:
+The release files are assembled by `build_dist.py`. The installer also needs
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install --id JRSoftware.InnoSetup -e`);
+without it only the zip is built.
 
 ```
 uv run python build_dist.py
 ```
 
 It compiles the small launcher (`launcher\ProfMute.cs`), copies an explicit list of files into
-`dist\ProfMute`, and makes the zip.
+`dist\ProfMute`, zips that folder, and builds the installer from it (`installer\ProfMute.iss`).
 
 ## License
 
