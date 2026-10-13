@@ -41,6 +41,75 @@ ASK_TIP = ("A conflict is a word Whisper heard that the subtitles do not have.\n
            "On: the batch stops at each one, plays a sound and lets you decide.\n"
            "Off: the batch never waits for you. Three listens decide, and the word is muted only if "
            "two of them hear it in the same place.")
+UNRESOLVED_TIP = ("An unresolved word is one the subtitles have but Whisper never heard, even after "
+                  "listening to that line again. ProfMute knows which subtitle line it is in, but not exactly when it is said.\n\n"
+                  "On: ProfMute plays a sound and shows you each one. You can play the line, then mute the whole "
+                  "line, mute only its best guess at the spot, or leave it. In a batch, this pauses the batch.\n"
+                  "Off: nothing is muted. The lines are listed in the log under UNRESOLVED for you to check by ear.")
+OWN_FOLDER_TIP = ("On: inside the output folder, each movie gets a folder named after it, holding its clean copy "
+                  "and its clean subtitles:\n\n"
+                  "     Output folder\\Iron Man\\Iron Man.clean.mkv\n\n"
+                  "Off: every clean copy goes straight into the output folder.\n\n"
+                  "Needs an output folder.")
+LOG_BESIDE_TIP = ("The log lists every spot that was muted, with its time, plus the conflicts and unresolved words.\n\n"
+                  "On: each movie's log is saved in the same folder as its clean copy.\n"
+                  "Off: all logs go into the Log folder below, which starts as a \"log\" folder next to ProfMute.")
+TIPS = {
+    "movie": "The movie to clean. It is only read, never changed.",
+    "srt": "Subtitles for this movie (a .srt file). They double-check what Whisper hears, and the clean subtitle "
+           "file is made from them.\n\nLeave empty and ProfMute uses a .srt next to the movie with the same name, "
+           "or else the English subtitles inside the movie file.",
+    "out": "Where the clean copy is saved: the movie with the words on your list muted.\n\n"
+           "Fills itself in as <movie name>.clean.mkv next to the movie. It is always an .mkv file.",
+    "out_srt": "Where the clean subtitles are saved: the same subtitles with the words on your list deleted.\n\n"
+               "Fills itself in next to the clean copy, under the name media players pair with it. "
+               "Only written when the movie has subtitles.",
+    "list": "The movies to clean, done one after another from the top. \"Subtitles\" shows which subtitles "
+            "each one will use, \"Status\" how it went.",
+    "add_files": "Add movies to the list. You can pick .srt files here too: each one is given to the movie "
+                 "in the list that has the same name.",
+    "add_folder": "Add every movie in a folder and in all the folders inside it. Clean copies made earlier are left out.",
+    "set_subtitle": "Choose a subtitle file by hand for the movie selected in the list.",
+    "remove": "Take the selected movies off the list. Nothing is deleted from your disk.",
+    "clear": "Empty the list. Nothing is deleted from your disk.",
+    "batch_out": "Where the clean copies of the batch are saved. Leave empty to put each one next to its own movie.",
+    "log_dir": "The folder for logs when they are not put next to the clean copies (untick the box above).\n\n"
+               "Starts as a \"log\" folder next to ProfMute.",
+    "words": "The list of words and phrases to mute. It is a plain text file you can change.\n\n"
+             "Browse picks a different list; Edit opens this one.",
+    "words_edit": "Open the word list in your text editor. Changes apply to the next run.",
+    "model": "The speech recognition model that listens to the movie. Bigger models hear more accurately but are "
+             "slower and a bigger download. A model downloads itself the first time it is used.\n\n"
+             "On a PC without an NVIDIA graphics card, pick a small one.",
+    "padding": "Extra silence added around each muted word, because speech recognition marks where a word "
+               "starts and ends only roughly.",
+    "pad_before": "Seconds of extra silence before each muted word.\n\nRaise it if you can hear the start of a "
+                  "word; lower it if the end of the word before gets cut off.",
+    "pad_after": "Seconds of extra silence after each muted word.\n\nRaise it if you can hear the end of a "
+                 "word; lower it if the start of the next word gets cut off.",
+    "start": "Clean the movie on the One movie tab, or every movie in the Batch list, whichever tab is showing.",
+    "cancel": "Stop the run. A clean copy that was only half written is deleted. Your original movie is never touched.",
+    "dark": "Switch the window between dark and light colours.",
+}
+PREVIEW_TIP = ("A trial run. ProfMute does all the listening and writes the log, so you can see what it would "
+               "mute, but it writes no video and no subtitle file, and it never stops to ask you anything.")
+SKIP_TIP = ("On: a movie whose clean copy already exists is left alone, so a batch that was interrupted can "
+            "simply be started again.\nOff: every movie is done again and its clean copy replaced.")
+BUTTON_TIPS = {
+    "play": "Hear the few seconds around the word, as they are in the original movie.",
+    "mute": "Silence this word in the clean copy, at the place Whisper heard it.",
+    "leave": "Change nothing here. The word stays audible in the clean copy.",
+    "auto": "Stop asking for this movie. Three listens decide this conflict and the remaining ones: "
+            "a word is muted only if two of them hear it in the same place.",
+    "play_line": "Hear the whole subtitle line, as it is in the original movie.",
+    "play_spot": "Hear only the stretch that 'Mute the estimated spot' would silence, to judge whether the guess is right.",
+    "line": "Silence the whole subtitle line in the clean copy. Certain to cover the word, "
+            "but the other words of the line go silent too.",
+    "spot": "Silence only ProfMute's best guess at where the word is, worked out from the words around it "
+            "that Whisper did hear. Cuts much less, but can miss the word. Use 'Play the spot' first.",
+    "leave_unresolved": "Mute nothing for this line. It stays listed under UNRESOLVED in the log.",
+    "leave_rest": "Stop asking for this movie. This line and the remaining unresolved ones are left as they are.",
+}
 
 
 def load_settings():
@@ -109,9 +178,11 @@ class Tooltip:
     """A short explanation that appears while the mouse rests on a widget."""
     def __init__(self, widget, text):
         self.widget, self.text, self.tip, self.timer = widget, text, None, None
+        widget.tooltip = self
         widget.bind("<Enter>", lambda e: self.schedule(), add="+")
         widget.bind("<Leave>", lambda e: self.hide(), add="+")
         widget.bind("<ButtonPress>", lambda e: self.hide(), add="+")
+        widget.bind("<Destroy>", lambda e: self.hide(), add="+")
 
     def schedule(self):
         self.hide()
@@ -125,12 +196,14 @@ class Tooltip:
                  background="#fffbe6", foreground="#1e1e1e").pack()
 
     def hide(self):
-        if self.timer:
-            self.widget.after_cancel(self.timer)
-            self.timer = None
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
+        try:
+            if self.timer:
+                self.widget.after_cancel(self.timer)
+            if self.tip:
+                self.tip.destroy()
+        except tk.TclError:
+            pass  # the widget went away with its window
+        self.timer = self.tip = None
 
 
 class App(ttk.Frame):
@@ -172,7 +245,10 @@ class App(ttk.Frame):
         self.batch_out = tk.StringVar()
         self.skip_done = tk.BooleanVar(value=True)
         self.batch_ask = tk.BooleanVar(value=bool(settings.get("batch_ask", False)))
+        self.own_folder = tk.BooleanVar(value=bool(settings.get("batch_own_folder", False)))
+        self.log_beside = tk.BooleanVar(value=bool(settings.get("log_beside", True)))
         self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", False)))
+        self.ask_unresolved = tk.BooleanVar(value=bool(settings.get("ask_unresolved", False)))
         self.dry = tk.BooleanVar()
         self.dark = tk.BooleanVar(value=saved_dark())
         self.pad_before = tk.StringVar(value=f"{profmute.PAD_BEFORE:.2f}")
@@ -189,11 +265,11 @@ class App(ttk.Frame):
 
         # --- one movie
         one.columnconfigure(1, weight=1)
-        self.row(one, 0, "Movie file", self.movie, self.browse_movie)
+        self.row(one, 0, "Movie file", self.movie, self.browse_movie, tip=TIPS["movie"])
         self.row(one, 1, "Subtitle file (optional)", self.srt, self.browse_srt,
-                 "Leave empty to use a .srt next to the movie, or the subtitles inside it.")
-        self.out_widgets = self.row(one, 3, "Output file", self.out, self.browse_out)
-        self.out_widgets += self.row(one, 4, "Clean subtitle file", self.out_srt, self.browse_out_srt)
+                 "Leave empty to use a .srt next to the movie, or the subtitles inside it.", tip=TIPS["srt"])
+        self.out_widgets = self.row(one, 3, "Output file", self.out, self.browse_out, tip=TIPS["out"])
+        self.out_widgets += self.row(one, 4, "Clean subtitle file", self.out_srt, self.browse_out_srt, tip=TIPS["out_srt"])
 
         # --- batch
         many.columnconfigure(1, weight=1)
@@ -209,77 +285,110 @@ class App(ttk.Frame):
         tree_scroll.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.configure(yscrollcommand=tree_scroll.set)
+        Tooltip(self.tree, TIPS["list"])
         buttons = ttk.Frame(many)
         buttons.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
-        for text, command in (("Add files...", self.add_files), ("Add folder...", self.add_folder),
-                              ("Set subtitle...", self.set_subtitle), ("Remove", self.remove_selected),
-                              ("Clear", self.clear_batch)):
+        for text, command, tip in (("Add files...", self.add_files, "add_files"), ("Add folder...", self.add_folder, "add_folder"),
+                                   ("Set subtitle...", self.set_subtitle, "set_subtitle"),
+                                   ("Remove", self.remove_selected, "remove"), ("Clear", self.clear_batch, "clear")):
             b = ttk.Button(buttons, text=text, command=command)
             b.pack(side="left", padx=(0, 6))
+            Tooltip(b, TIPS[tip])
             self.inputs.append(b)
         self.out_widgets += self.row(many, 2, "Output folder", self.batch_out, self.browse_batch_out,
-                                     "Leave empty to put each clean copy next to its own movie.")
-        skip = ttk.Checkbutton(many, text="Skip movies that already have a clean copy", variable=self.skip_done)
-        skip.grid(row=4, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        ask = ttk.Checkbutton(many, text="Pause and ask me about conflicts (otherwise three listens decide)",
+                                     "Leave empty to put each clean copy next to its own movie.", tip=TIPS["batch_out"])
+        options = ttk.Frame(many)
+        options.grid(row=4, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
+        own = ttk.Checkbutton(options, text="Give each movie its own folder in the output folder", variable=self.own_folder,
+                              command=lambda: save_settings(batch_own_folder=self.own_folder.get()))
+        skip = ttk.Checkbutton(options, text="Skip movies that already have a clean copy", variable=self.skip_done)
+        ask = ttk.Checkbutton(options, text="Pause and ask me about conflicts",
                               variable=self.batch_ask, command=lambda: save_settings(batch_ask=self.batch_ask.get()))
-        ask.grid(row=5, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        Tooltip(ask, ASK_TIP)
-        self.inputs += [skip, ask]
+        own.grid(row=0, column=0, sticky="w", padx=(0, 28))
+        skip.grid(row=0, column=1, sticky="w")
+        ask.grid(row=1, column=0, sticky="w", padx=(0, 28), pady=(4, 0))
+        for box, tip in ((own, OWN_FOLDER_TIP), (skip, SKIP_TIP), (ask, ASK_TIP)):
+            Tooltip(box, tip)
+        self.inputs += [own, skip, ask]
 
         # --- shared by both tabs
-        self.row(self, 1, "Log folder", self.log_dir, self.browse_log_dir)
+        beside = ttk.Checkbutton(self, text="Put the log next to the clean copy", variable=self.log_beside,
+                                 command=self.log_beside_changed)
+        beside.grid(row=1, column=1, columnspan=2, sticky="w", padx=8, pady=(0, 2))
+        Tooltip(beside, LOG_BESIDE_TIP)
+        self.inputs.append(beside)
+        self.log_widgets = self.row(self, 2, "Log folder", self.log_dir, self.browse_log_dir, tip=TIPS["log_dir"])
 
-        ttk.Label(self, text="Word list").grid(row=2, column=0, sticky="w", pady=4)
+        words_label = ttk.Label(self, text="Word list")
+        words_label.grid(row=3, column=0, sticky="w", pady=4)
         words_entry = ttk.Entry(self, textvariable=self.words)
-        words_entry.grid(row=2, column=1, sticky="ew", padx=8)
+        words_entry.grid(row=3, column=1, sticky="ew", padx=8)
         words_buttons = ttk.Frame(self)
-        words_buttons.grid(row=2, column=2, sticky="ew")
+        words_buttons.grid(row=3, column=2, sticky="ew")
         words_browse = ttk.Button(words_buttons, text="Browse...", command=self.browse_words)
         words_browse.pack(side="left")
         words_edit = ttk.Button(words_buttons, text="Edit", width=6, command=self.edit_words)
         words_edit.pack(side="left", padx=(6, 0))
-        Tooltip(words_edit, "Open the word list in your text editor. Changes apply to the next run.")
+        for w in (words_label, words_entry, words_browse):
+            Tooltip(w, TIPS["words"])
+        Tooltip(words_edit, TIPS["words_edit"])
         self.inputs += [words_entry, words_browse, words_edit]
 
-        ttk.Label(self, text="Whisper model").grid(row=3, column=0, sticky="w", pady=4)
+        model_label = ttk.Label(self, text="Whisper model")
+        model_label.grid(row=4, column=0, sticky="w", pady=4)
         self.model_box = ttk.Combobox(self, state="readonly")
         self.model_box.bind("<<ComboboxSelected>>", self.model_changed)
-        self.model_box.grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 0))
+        self.model_box.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 0))
+        for w in (model_label, self.model_box):
+            Tooltip(w, TIPS["model"])
         self.inputs.append(self.model_box)
         cached = settings.get("models") if isinstance(settings.get("models"), dict) else {}
         self.show_models([{"name": name, "note": note, **cached.get(name, {})} for name, note in profmute.load_models()],
                          settings.get("model"))
 
-        ttk.Label(self, text="Padding (seconds)").grid(row=4, column=0, sticky="w", pady=4)
+        pad_label = ttk.Label(self, text="Padding (seconds)")
+        pad_label.grid(row=5, column=0, sticky="w", pady=4)
+        Tooltip(pad_label, TIPS["padding"])
         pads = ttk.Frame(self)
-        pads.grid(row=4, column=1, columnspan=2, sticky="w", padx=8)
-        for text, var in (("before the word", self.pad_before), ("after the word", self.pad_after)):
+        pads.grid(row=5, column=1, columnspan=2, sticky="w", padx=8)
+        for text, var, tip in (("before the word", self.pad_before, "pad_before"), ("after the word", self.pad_after, "pad_after")):
             spin = ttk.Spinbox(pads, textvariable=var, from_=0.0, to=2.0, increment=0.05, width=6, format="%.2f")
             spin.pack(side="left")
-            ttk.Label(pads, text=text).pack(side="left", padx=(4, 16))
+            label = ttk.Label(pads, text=text)
+            label.pack(side="left", padx=(4, 16))
+            for w in (spin, label):
+                Tooltip(w, TIPS[tip])
             self.inputs.append(spin)
 
         confirm = ttk.Checkbutton(self, text="Confirm each word with a second listen", variable=self.confirm,
                                   command=lambda: save_settings(confirm=self.confirm.get()))
-        confirm.grid(row=5, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
+        confirm.grid(row=6, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
         Tooltip(confirm, CONFIRM_TIP)
+        unresolved = ttk.Checkbutton(self, text="Let me hear and decide unresolved words (in the subtitles, but not heard)",
+                                     variable=self.ask_unresolved,
+                                     command=lambda: save_settings(ask_unresolved=self.ask_unresolved.get()))
+        unresolved.grid(row=7, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
+        Tooltip(unresolved, UNRESOLVED_TIP)
         dry = ttk.Checkbutton(self, text="Preview only: list the words in the log, write no video or subtitles",
                               variable=self.dry, command=self.dry_changed)
-        dry.grid(row=6, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        self.inputs += [confirm, dry]
+        dry.grid(row=8, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
+        Tooltip(dry, PREVIEW_TIP)
+        self.inputs += [confirm, unresolved, dry]
 
         bar = ttk.Frame(self)
-        bar.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(12, 6))
+        bar.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(12, 6))
         self.start_btn = ttk.Button(bar, text="Start", command=self.start)
         self.start_btn.pack(side="left")
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="left", padx=8)
         ttk.Label(bar, textvariable=self.status).pack(side="left", padx=8)
-        ttk.Checkbutton(bar, text="Dark mode", variable=self.dark, command=self.dark_changed).pack(side="right")
+        self.dark_box = ttk.Checkbutton(bar, text="Dark mode", variable=self.dark, command=self.dark_changed)
+        self.dark_box.pack(side="right")
+        for w, tip in ((self.start_btn, "start"), (self.cancel_btn, "cancel"), (self.dark_box, "dark")):
+            Tooltip(w, TIPS[tip])
 
         pane = ttk.Frame(self)
-        pane.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        pane.grid(row=10, column=0, columnspan=3, sticky="nsew")
         self.text = tk.Text(pane, height=10, wrap="word", state="disabled", font=("Consolas", 10))
         scroll = ttk.Scrollbar(pane, command=self.text.yview)
         scroll.pack(side="right", fill="y")
@@ -287,7 +396,8 @@ class App(ttk.Frame):
         self.text.configure(yscrollcommand=scroll.set)
 
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(8, weight=1)
+        self.rowconfigure(10, weight=1)
+        self.show_log_box()
         self.movie.trace_add("write", self.movie_changed)
         self.out.trace_add("write", self.out_changed)
 
@@ -302,12 +412,16 @@ class App(ttk.Frame):
         root.after(100, self.poll)
         threading.Thread(target=self.fetch_models, daemon=True).start()
 
-    def row(self, parent, r, label, var, browse, hint=None):
-        ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=4)
+    def row(self, parent, r, label, var, browse, hint=None, tip=None):
+        name = ttk.Label(parent, text=label)
+        name.grid(row=r, column=0, sticky="w", pady=4)
         entry = ttk.Entry(parent, textvariable=var)
         entry.grid(row=r, column=1, sticky="ew", padx=8)
         button = ttk.Button(parent, text="Browse...", command=browse)
         button.grid(row=r, column=2, sticky="ew")
+        if tip:
+            for w in (name, entry, button):
+                Tooltip(w, tip)
         if hint:
             ttk.Label(parent, text=hint, style="Hint.TLabel").grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=8)
         self.inputs += [entry, button]
@@ -493,6 +607,15 @@ class App(ttk.Frame):
         for w in self.out_widgets:
             w.configure(state="disabled" if self.dry.get() else "normal")
 
+    def log_beside_changed(self):
+        save_settings(log_beside=self.log_beside.get())
+        self.show_log_box()
+
+    def show_log_box(self):
+        """The Log folder box is not used while each log goes next to its clean copy."""
+        for w in self.log_widgets:
+            w.configure(state="disabled" if self.log_beside.get() or self.proc else "normal")
+
     # ------------------------------------------------------------ batch: the list
 
     def add_files(self):
@@ -589,10 +712,13 @@ class App(ttk.Frame):
             pass
         self.q.put(("ffmpeg", bool(profmute.find_tool("ffmpeg") and profmute.find_tool("ffprobe"))))
 
-    def shared_args(self):
-        """The script arguments both tabs share, or None after telling the user what is wrong."""
+    def shared_args(self, log_box=True):
+        """The script arguments both tabs share, or None after telling the user what is wrong.
+
+        log_box=False leaves the log folder out: the batch then gives each movie its own.
+        """
         log_dir, words = self.path(self.log_dir), self.path(self.words)
-        if not log_dir:
+        if log_box and not log_dir:
             return messagebox.showerror("ProfMute", "Choose a folder for the logs.")
         if not os.path.isfile(words):
             return messagebox.showerror("ProfMute", f"This word list does not exist:\n{words}")
@@ -605,9 +731,10 @@ class App(ttk.Frame):
         if not self.ffmpeg_ready():
             return None
         save_settings(words=words)
-        return ["--log-dir", log_dir, "--words", words, "--model", self.model(), "--pad-before", str(pads[0]),
+        return (["--log-dir", log_dir] if log_box else []) + \
+               ["--words", words, "--model", self.model(), "--pad-before", str(pads[0]),
                 "--pad-after", str(pads[1])] + (["--confirm"] if self.confirm.get() else []) + \
-               (["--dry"] if self.dry.get() else [])
+               (["--unresolved", "ask"] if self.ask_unresolved.get() else []) + (["--dry"] if self.dry.get() else [])
 
     def command(self, movie):
         return [self.python(), "-u", str(SCRIPT), str(movie)]
@@ -638,9 +765,12 @@ class App(ttk.Frame):
             if out_srt and srt and os.path.exists(out_srt) and os.path.samefile(out_srt, srt):
                 return messagebox.showerror("ProfMute", "The clean subtitle file is the subtitle file being read.\n"
                                             "Pick a different name so the original stays untouched.")
-        shared = self.shared_args()
+        beside = self.log_beside.get()
+        shared = self.shared_args(log_box=not beside)
         if not shared:
             return
+        if beside:   # next to the clean copy (in a preview: where it would go)
+            shared += ["--log-dir", os.path.dirname(os.path.abspath(out or movie))]
         if not dry:
             existing = [p for p in (out, out_srt) if p and os.path.exists(p)]
             if existing and not messagebox.askyesno("ProfMute", (
@@ -659,16 +789,23 @@ class App(ttk.Frame):
         rows = self.tree.get_children()
         if not rows:
             return messagebox.showerror("ProfMute", "Add at least one movie to the list first.")
-        shared = self.shared_args()
+        dry, out_dir = self.dry.get(), self.path(self.batch_out)
+        own_folder, log_beside = self.own_folder.get(), self.log_beside.get()
+        if own_folder and not out_dir:
+            return messagebox.showerror("ProfMute", "Choose an output folder first.\n\n\"Give each movie its own folder\" "
+                                        "makes those folders inside the output folder.")
+        shared = self.shared_args(log_box=not log_beside)
         if not shared:
             return
         shared += ["--conflicts", "ask" if self.batch_ask.get() else "auto"]
-        dry, out_dir = self.dry.get(), self.path(self.batch_out)
         jobs, skipped = [], 0
         for iid in rows:
             d = self.batch[iid]
             movie = d["movie"]
-            out = (Path(out_dir) if out_dir else movie.parent) / (movie.stem + ".clean.mkv")
+            folder = Path(out_dir) if out_dir else movie.parent
+            if own_folder:   # Output\Iron Man\Iron Man.clean.mkv (a folder name cannot end in a dot or a space)
+                folder = folder / (movie.stem.rstrip(". ") or movie.stem)
+            out = folder / (movie.stem + ".clean.mkv")
             if not movie.is_file():
                 self.show_row(iid, "Movie file is missing")
             elif d["srt"] and not os.path.isfile(d["srt"]):
@@ -676,7 +813,8 @@ class App(ttk.Frame):
             elif not dry and self.skip_done.get() and out.exists():
                 self.show_row(iid, "Skipped: clean copy exists")
             else:
-                cmd = self.command(movie) + shared + (["--srt", d["srt"]] if d["srt"] else [])
+                cmd = self.command(movie) + shared + (["--srt", d["srt"]] if d["srt"] else []) + \
+                      (["--log-dir", str(out.parent)] if log_beside else [])
                 jobs.append({"cmd": cmd if dry else cmd + ["--out", str(out)], "out": str(out),
                              "title": movie.name, "iid": iid})
                 self.show_row(iid, "Waiting")
@@ -796,40 +934,66 @@ class App(ttk.Frame):
     # ------------------------------------------------------------ conflicts: the user decides
 
     def ask(self, info):
-        """The script found a word the subtitles do not have and waits for an answer."""
+        """The script waits for an answer about a conflict or an unresolved word: show the question."""
         self.ask_info = info
-        self.status.set(f"Waiting for you: conflict {info['n']} of {info['of']}")
+        unresolved = info.get("kind") == "unresolved"
+        what = "unresolved word" if unresolved else "conflict"
+        self.status.set(f"Waiting for you: {what} {info['n']} of {info['of']}")
         if winsound:
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         win = self.ask_win = tk.Toplevel(self.root)
-        win.title(f"ProfMute - conflict {info['n']} of {info['of']}")
+        win.title(f"ProfMute - {what} {info['n']} of {info['of']}")
         win.transient(self.root)
         win.resizable(False, False)
         if self.dark.get():
             win.configure(background=DARK["bg"])
         box = ttk.Frame(win, padding=18)
         box.pack(fill="both", expand=True)
-        ttk.Label(box, text=f"“{info['word']}” at {info['time'][:8]}", style="Big.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(box, text="Whisper heard this word, but the subtitles do not have it.", style="Hint.TLabel").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(2, 12))
-        facts = [("Movie", self.job["title"] if self.job else ""),
-                 ("Whisper heard", f"{info['before']}  »{info['word']}«  {info['after']}".strip()),
-                 ("Subtitles say", info["subtitles"] or "(nothing at that moment)")]
-        if info.get("listens"):
-            facts.append(("Second listens", info["listens"].capitalize()))
+        movie = self.job["title"] if self.job else ""
+        if unresolved:
+            headline = f"“{info['word']}” somewhere near {info['time'][:8]}"
+            explanation = "The subtitles have this word, but Whisper did not hear it, so nothing is muted yet."
+            facts = [("Movie", movie),
+                     ("Subtitle line", f"{info['line']}   ({info['line_seconds']:.1f} seconds)"),
+                     ("Whisper heard", info["heard"] or "(nothing there)"),
+                     ("Best guess", f"{info['spot']}   ({info['spot_seconds']:.1f} seconds)")]
+            plays = [("play_line", "▶  Play the line", "clip"), ("play_spot", "▶  Play the spot", "clip_spot")]
+            choices = [("line", "Mute the whole line", "line"), ("spot", "Mute the estimated spot", "spot"),
+                       ("leave_unresolved", "Leave it", "leave")]
+            rest = ("leave_rest", "Leave this one and all the rest in this movie")
+        else:
+            headline = f"“{info['word']}” at {info['time'][:8]}"
+            explanation = "Whisper heard this word, but the subtitles do not have it."
+            facts = [("Movie", movie),
+                     ("Whisper heard", f"{info['before']}  »{info['word']}«  {info['after']}".strip()),
+                     ("Subtitles say", info["subtitles"] or "(nothing at that moment)")]
+            if info.get("listens"):
+                facts.append(("Second listens", info["listens"].capitalize()))
+            plays = [("play", "▶  Play", "clip")]
+            choices = [("mute", "Mute it", "mute"), ("leave", "Leave it", "leave")]
+            rest = ("auto", "Decide the rest of this movie automatically")
+
+        def button(parent, tip, text, command, enabled=True):
+            b = ttk.Button(parent, text=text, command=command, state="normal" if enabled else "disabled")
+            Tooltip(b, BUTTON_TIPS[tip])
+            return b
+
+        ttk.Label(box, text=headline, style="Big.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(box, text=explanation, style="Hint.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 12))
         for r, (label, value) in enumerate(facts, 2):
             ttk.Label(box, text=label).grid(row=r, column=0, sticky="nw", pady=3, padx=(0, 14))
             ttk.Label(box, text=value, wraplength=460, justify="left").grid(row=r, column=1, sticky="w", pady=3)
-        buttons = ttk.Frame(box)
-        buttons.grid(row=len(facts) + 2, column=0, columnspan=2, sticky="w", pady=(16, 0))
-        play = ttk.Button(buttons, text="▶  Play", command=self.play_clip,
-                          state="normal" if winsound and info.get("clip") else "disabled")
-        play.pack(side="left")
-        ttk.Button(buttons, text="Mute it", command=lambda: self.answer("mute")).pack(side="left", padx=(18, 6))
-        ttk.Button(buttons, text="Leave it", command=lambda: self.answer("leave")).pack(side="left")
-        ttk.Button(box, text="Decide the rest of this movie automatically", command=lambda: self.answer("auto")).grid(
-            row=len(facts) + 3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        listen = ttk.Frame(box)
+        listen.grid(row=len(facts) + 2, column=0, columnspan=2, sticky="w", pady=(16, 0))
+        for tip, text, clip in plays:
+            button(listen, tip, text, lambda clip=clip: self.play_clip(clip),
+                   bool(winsound and info.get(clip))).pack(side="left", padx=(0, 6))
+        decide = ttk.Frame(box)
+        decide.grid(row=len(facts) + 3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        for tip, text, reply in choices:
+            button(decide, tip, text, lambda reply=reply: self.answer(reply)).pack(side="left", padx=(0, 6))
+        button(box, rest[0], rest[1], lambda: self.answer("auto")).grid(
+            row=len(facts) + 4, column=0, columnspan=2, sticky="w", pady=(10, 0))
         win.protocol("WM_DELETE_WINDOW", lambda: self.answer("auto"))
         self.title_bar(win)
         win.update_idletasks()
@@ -839,8 +1003,8 @@ class App(ttk.Frame):
         win.lift()
         win.focus_force()
 
-    def play_clip(self):
-        clip = self.ask_info.get("clip")
+    def play_clip(self, which="clip"):
+        clip = self.ask_info.get(which)
         if winsound and clip and os.path.isfile(clip):
             winsound.PlaySound(clip, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
 
@@ -854,8 +1018,13 @@ class App(ttk.Frame):
     def answer(self, reply):
         info = self.ask_info
         self.close_ask()
-        said = {"mute": "muted", "leave": "left in", "auto": "three listens decide this one and the rest"}[reply]
-        self.write(f"    Conflict {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
+        if info.get("kind") == "unresolved":
+            said = {"line": "whole line muted", "spot": "estimated spot muted", "leave": "left in",
+                    "auto": "left in, and so are the rest"}[reply]
+            self.write(f"    Unresolved {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
+        else:
+            said = {"mute": "muted", "leave": "left in", "auto": "three listens decide this one and the rest"}[reply]
+            self.write(f"    Conflict {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
         self.status.set("Working...")
         if self.proc:
             try:
@@ -915,6 +1084,7 @@ class App(ttk.Frame):
             w.configure(state="disabled" if running else "readonly" if w is self.model_box else "normal")
         if not running:
             self.dry_changed()
+            self.show_log_box()
         other = 1 - self.tabs.index("current")   # no switching tabs mid-run
         self.tabs.tab(other, state="disabled" if running else "normal")
         self.start_btn.configure(state="disabled" if running else "normal")
@@ -949,7 +1119,7 @@ def main():
         pass
     root = tk.Tk()
     root.title(f"ProfMute {profmute.__version__}")
-    root.minsize(860, 800)
+    root.minsize(860, 850)
     if ICON.is_file():
         root.iconbitmap(default=str(ICON))
     App(root).pack(fill="both", expand=True)

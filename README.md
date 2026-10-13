@@ -29,12 +29,12 @@ Everything runs on your own PC. Nothing about your movies is sent anywhere.
 
 Both downloads are on the [latest release](https://github.com/SevynTech/ProfMute/releases/latest).
 
-**With the installer (easiest).** Download `ProfMute-Setup-1.0.0.exe` and run it. It installs for
+**With the installer (easiest).** Download the `ProfMute-Setup` exe and run it. It installs for
 your Windows account only, so it needs no administrator rights. Its last step downloads Python and
 the speech recognition libraries (about 2.2 GB), which takes a few minutes. ProfMute is then in the
 Start menu. To remove it, use Windows Settings > Apps > Installed apps.
 
-**From the zip (nothing is installed).** Download `ProfMute-1.0.0.zip`, unzip the `ProfMute`
+**From the zip (nothing is installed).** Download the `ProfMute` zip, unzip the `ProfMute`
 folder somewhere you can write to, such as `Documents` (not `Program Files`), and double-click
 `ProfMute.exe`. The first time, it asks to download the same 2.2 GB into that folder. To remove
 it, delete the folder.
@@ -43,8 +43,7 @@ Windows may show "Windows protected your PC" because neither file is signed. Cho
 then **Run anyway**. If you would rather not run an exe at all, unzip the zip, open a terminal in
 the ProfMute folder and run `tools\uv.exe run python profmute_gui.py`.
 
-Removing ProfMute leaves two things behind on purpose: its `log` folder, if you used the default
-one, and the speech models, which are stored in `%USERPROFILE%\.cache\huggingface`.
+Removing ProfMute leaves two things behind on purpose: its `log` folder, if you used it, and the speech models, which are stored in `%USERPROFILE%\.cache\huggingface`.
 
 ## Using it
 
@@ -66,12 +65,17 @@ On the **Batch** tab, add movies with **Add files...** or a whole folder tree wi
 another folder is matched to the movie with the same name, or assign one with **Set subtitle...**.
 Each clean copy goes next to its own movie unless you choose an output folder.
 
+With an output folder, "Give each movie its own folder" builds a library layout inside it: a
+folder named after each movie, holding its clean copy and clean subtitles, as in
+`Output\Iron Man\Iron Man.clean.mkv`.
+
 Movies run one after another. One failing does not stop the rest, and movies that already have a
 clean copy are skipped, so an interrupted batch can simply be started again.
 
 ### Options
 
-- **Log folder**: where the logs go. Defaults to a `log` folder next to the program.
+- **Put the log next to the clean copy**: on by default, on both tabs. Untick it and every log
+  goes to the **Log folder** instead, which starts as a `log` folder next to the program.
 - **Word list**: the list of words to mute. **Edit** opens it. See [Word list](#word-list).
 - **Whisper model**: bigger is more accurate and slower. See [Models](#models).
 - **Padding**: extra silence before and after each word. If you can hear the end of a word, raise
@@ -95,6 +99,11 @@ subtitle line shown to Whisper as a hint, then on a filtered copy of the sound (
 because Whisper misses different words in differently prepared audio. If the word still is not
 found, it is listed in the log under `UNRESOLVED` and **not muted**; those are the spots to check
 by ear.
+
+Tick "Let me hear and decide unresolved words" and ProfMute asks you about each of those instead.
+It knows which subtitle line the word is in, but not exactly when it is said, so it offers three
+choices after you have played the line: mute the whole line, mute only its best guess at the spot
+(worked out from the words around it that Whisper did hear, and playable first), or leave it.
 
 **Second listens.** With "Confirm each word with a second listen" ticked, every word found is
 listened to again on its own. If the two listens disagree about where the word is, a third decides,
@@ -156,8 +165,11 @@ faster-whisper, or a folder on your PC containing one. ProfMute works in English
 - `<movie>.clean.en.srt`: the subtitles with the words deleted. Media players and Plex pick it up
   by its name. **The subtitle tracks inside the clean `.mkv` are copies of the originals and still
   contain the words**, so select the `.srt` when watching.
-- `<movie>.profmute.txt` in the log folder: every muted spot with its time and length, how
-  conflicts were settled, anything `UNRESOLVED`, and the settings used.
+- `<movie>.profmute.txt`, next to the clean copy unless you chose the log folder: every muted
+  spot with its time and length, how conflicts were settled, anything `UNRESOLVED`, and the
+  settings used.
+
+Every option in the window explains itself when the mouse rests on it.
 
 ## Command line
 

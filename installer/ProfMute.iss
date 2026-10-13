@@ -1,5 +1,5 @@
 ; ProfMute installer (Inno Setup 6). Built by build_dist.py from the files in dist\ProfMute:
-;   ISCC /DAppVersion=1.0.0 installer\ProfMute.iss
+;   ISCC /DAppVersion=<version> installer\ProfMute.iss
 ;
 ; It installs for the current user only, without administrator rights, because ProfMute writes
 ; next to its own exe: the Python environment, the logs, the settings and the editable lists.

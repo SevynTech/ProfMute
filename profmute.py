@@ -3,7 +3,7 @@
 Usage:  uv run python profmute.py "C:\\path\\movie.mkv" [--dry] [--srt subs.srt | --no-srt] [--model large-v3]
                                  [--out clean.mkv] [--out-srt clean.srt] [--log-dir folder] [--words words.txt]
                                  [--pad-before 0.02] [--pad-after 0.30] [--device auto|cuda|cpu]
-                                 [--confirm] [--conflicts ask|auto]
+                                 [--confirm] [--conflicts ask|auto] [--unresolved ask|leave]
 Output: <name>.clean.mkv next to the original (or --out), and a log of the muted words,
         <name>.profmute.txt, in a "log" folder next to this program (or --log-dir).
         The original file is never modified.
@@ -25,7 +25,7 @@ import argparse, bisect, json, os, re, shutil, subprocess, sys, tempfile
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -692,19 +692,123 @@ def vote(model, samples, hit, others):
 
 
 def ask_user(info):
-    """Put one conflict to the user. -> 'mute', 'leave', or 'auto' (three listens decide this and the rest)"""
+    """Put one question to the user, in the terminal or (as one line of JSON) to the window.
+
+    A conflict (info['kind'] == 'conflict'): -> 'mute', 'leave', or 'auto' (three listens decide this and the rest)
+    An unresolved word ('unresolved'):       -> 'line', 'spot', 'leave', or 'auto' (leave this and the rest)
+    """
+    unresolved = info.get("kind") == "unresolved"
     if sys.stdin is not None and sys.stdin.isatty():
-        print(f"\nCONFLICT {info['n']} of {info['of']} at {info['time']}: Whisper heard \"{info['word']}\", "
-              f"the subtitles do not have it.")
-        print(f"    Whisper:   {info['before']} >>{info['word']}<< {info['after']}")
-        print(f"    Subtitles: {info['subtitles'] or '(nothing at that moment)'}")
+        if unresolved:
+            print(f"\nUNRESOLVED {info['n']} of {info['of']} at {info['time']}: the subtitles have \"{info['word']}\", "
+                  f"Whisper did not hear it.")
+            print(f"    Subtitle line: {info['line']}  ({info['line_seconds']:.1f} s)")
+            print(f"    Whisper heard: {info['heard'] or '(nothing)'}")
+            print(f"    Best guess at the spot: {info['spot']}  ({info['spot_seconds']:.1f} s)")
+            keys, question = {"w": "line", "s": "spot", "l": "leave", "r": "auto"}, \
+                "    mute the [w]hole line, only the estimated [s]pot, [l]eave it, or leave this and the [r]est? "
+        else:
+            print(f"\nCONFLICT {info['n']} of {info['of']} at {info['time']}: Whisper heard \"{info['word']}\", "
+                  f"the subtitles do not have it.")
+            print(f"    Whisper:   {info['before']} >>{info['word']}<< {info['after']}")
+            print(f"    Subtitles: {info['subtitles'] or '(nothing at that moment)'}")
+            keys, question = {"m": "mute", "l": "leave", "r": "auto"}, \
+                "    [m]ute it, [l]eave it, or let three listens decide this and the [r]est? "
         while True:
-            answer = input("    [m]ute it, [l]eave it, or let three listens decide this and the [r]est? ").strip().lower()[:1]
-            if answer in ("m", "l", "r"):
-                return {"m": "mute", "l": "leave", "r": "auto"}[answer]
+            answer = input(question).strip().lower()[:1]
+            if answer in keys:
+                return keys[answer]
     print(ASK + json.dumps(info), flush=True)
     answer = sys.stdin.readline().strip() if sys.stdin is not None else ""
-    return answer if answer in ("mute", "leave") else "auto"
+    return answer if answer in (("line", "spot", "leave") if unresolved else ("mute", "leave")) else "auto"
+
+
+def save_clip(path, samples, start, end):
+    """A stretch of the sound as a WAV file, for the window's Play buttons."""
+    import wave
+    import numpy as np
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SR)
+        part = samples[max(0, int(start * SR)):int(end * SR)]
+        wf.writeframes((np.clip(part, -1, 1) * 32767).astype(np.int16).tobytes())
+    return path
+
+
+def estimate_spot(cue, first, count, words):
+    """Guess when, inside a subtitle line, a word Whisper did not hear was said. -> (start, end)
+
+    cue = (start, end, text); the word is pieces first .. first+count-1 of the line (see cue_scan).
+    The words of the line Whisper did hear are the landmarks: the missing one lies between the
+    heard word before it and the heard word after it. With no landmarks, its place in the line's
+    text is used as its place in the line's time, which is rougher.
+    """
+    cs, ce, text = cue
+    toks = [norm(TAGS.sub("", p))[1] for _, p in cue_scan(text)[0]]
+    near = [w for w in words if w[0] >= cs - 1.0 and w[1] <= ce + 1.0]
+    landmarks, j = {}, 0
+    for i, tok in enumerate(toks):
+        if tok and not first <= i < first + count:
+            k = next((k for k in range(j, len(near)) if near[k][4] == tok), None)
+            if k is not None:
+                landmarks[i], j = near[k], k + 1
+    before = max((i for i in landmarks if i < first), default=None)
+    after = min((i for i in landmarks if i >= first + count), default=None)
+    size = lambda a, b: sum(len(t) + 1 for t in toks[a:b])        # letters, a stand-in for speaking time
+    length = min(1.5, 0.3 + 0.07 * size(first, first + count))    # how long saying the word probably takes
+    if before is not None and after is not None:
+        lo, hi = landmarks[before][1], landmarks[after][0]
+        if after - before - 1 == count and hi - lo >= 0.15:       # the word has the gap to itself: the gap is the spot
+            return max(0.0, lo - 0.1), hi + 0.1
+        # other unheard words share the gap (or Whisper left none): place it by its share of the letters
+        middle = lo + (hi - lo) * (size(before + 1, first) + size(first, first + count) / 2) / (size(before + 1, after) or 1)
+    elif before is not None:
+        middle = landmarks[before][1] + 0.07 * size(before + 1, first) + length / 2
+    elif after is not None:
+        middle = landmarks[after][0] - 0.07 * size(first + count, after) - length / 2
+    else:
+        middle = cs + (ce - cs) * (size(0, first) + size(first, first + count) / 2) / (size(0, len(toks)) or 1)
+    middle = min(max(middle, cs - 0.5), ce + 0.5)
+    return max(0.0, middle - length / 2 - 0.25), middle + length / 2 + 0.25   # a quarter second of margin: it is a guess
+
+
+def decide_unresolved(samples, words, cues, unresolved):
+    """Ask the user about each word that is in the subtitles but was never heard.
+
+    unresolved = [(line_start, line_end, label, cue_index), ...]
+    -> (spans to mute [(start, end, text, tag), ...], {index in unresolved: what was decided, for the log})
+    """
+    mute, decided, clips, used = [], {}, None, set()
+    for n, (cs, ce, label, k) in enumerate(unresolved):
+        scan = cue_scan(cues[k][2])[1]
+        at = next((x for x in range(len(scan)) if scan[x][2] == label and (k, x) not in used), 0)
+        used.add((k, at))
+        first, count = scan[at][:2] if scan else (0, 1)
+        s, e = estimate_spot(cues[k], first, count, words)
+        info = {"kind": "unresolved", "n": n + 1, "of": len(unresolved), "time": stamp(cs), "word": label,
+                "line": flat(cues[k][2]), "line_seconds": ce - cs,
+                "heard": " ".join(w[2] for w in words if w[0] >= cs - 0.5 and w[1] <= ce + 0.5),
+                "spot": f"{stamp(s)} to {stamp(e)}", "spot_seconds": e - s, "clip": None, "clip_spot": None}
+        if sys.stdin is None or not sys.stdin.isatty():  # the window can play both stretches
+            clips = clips or tempfile.mkdtemp(prefix="profmute-")
+            info["clip"] = save_clip(os.path.join(clips, f"line{n + 1}.wav"), samples, cs - 0.75, ce + 0.75)
+            info["clip_spot"] = save_clip(os.path.join(clips, f"spot{n + 1}.wav"), samples, s, e)
+        answer = ask_user(info)
+        if answer == "line":
+            mute.append((cs, ce, label, "unresolved: you muted the whole subtitle line"))
+            decided[n] = "whole line muted (your choice)"
+        elif answer == "spot":
+            mute.append((s, e, label, "unresolved: you muted an estimated spot"))
+            decided[n] = f"estimated spot {stamp(s)} muted (your choice)"
+        else:
+            decided[n] = "left in (your choice)"
+            if answer == "auto":
+                decided.update({m: "left in (your choice: leave the rest)" for m in range(n + 1, len(unresolved))})
+                break
+    if clips:
+        shutil.rmtree(clips, ignore_errors=True)
+    return mute, decided
 
 
 def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
@@ -714,7 +818,6 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
     backed  = indexes of the hits the subtitles back up, or None when no subtitles are in use
     -> (hits to mute, conflict lines for the log, Counter of what happened)
     """
-    import numpy as np
     is_conflict = lambda i: backed is not None and i not in backed
     asking = conflicts == "ask" and not dry
     votes, stats, mute, report = {}, Counter(), [], []   # stats: how many votes ended confirmed/moved/unsure
@@ -757,19 +860,15 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
             near = [w for w in words if s - 4 <= w[0] <= e + 4]
             before = " ".join(w[2] for w in near if w[1] <= s + 0.01)
             after = " ".join(w[2] for w in near if w[0] >= e - 0.01)
-            info = {"n": todo.index(i) + 1, "of": len(todo), "time": stamp(where[0]), "word": text,
+            info = {"kind": "conflict", "n": todo.index(i) + 1, "of": len(todo), "time": stamp(where[0]), "word": text,
                     "before": before if len(before) <= 80 else "... " + before[-80:].partition(" ")[2],
                     "after": after if len(after) <= 80 else after[:80].rpartition(" ")[0] + " ...",
                     "subtitles": "  /  ".join(flat(c[2]) for c in cues if c[0] < e + 3 and c[1] > s - 3),
                     "listens": f"heard in {heard} listens" if heard else None, "clip": None}
             if sys.stdin is None or not sys.stdin.isatty():  # the window can play it: a few seconds around the word
                 clips = clips or tempfile.mkdtemp(prefix="profmute-")
-                info["clip"] = os.path.join(clips, f"conflict{info['n']}.wav")
-                import wave
-                with wave.open(info["clip"], "wb") as wf:
-                    wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(SR)
-                    part = samples[max(0, int((where[0] - 3) * SR)):int((where[1] + 3) * SR)]
-                    wf.writeframes((np.clip(part, -1, 1) * 32767).astype(np.int16).tobytes())
+                info["clip"] = save_clip(os.path.join(clips, f"conflict{info['n']}.wav"), samples,
+                                         where[0] - 3, where[1] + 3)
             answer = ask_user(info)
             if answer == "auto":
                 asking = False
@@ -817,6 +916,9 @@ def main():
     ap.add_argument("--confirm", action="store_true", help="listen to every word a second time to check where it is")
     ap.add_argument("--conflicts", choices=("ask", "auto"), default="auto",
                     help="a word the subtitles do not have: ask = you decide, auto = three listens decide")
+    ap.add_argument("--unresolved", choices=("ask", "leave"), default="leave",
+                    help="a subtitle word that was never heard: ask = you decide (mute the line, an estimated "
+                         "spot, or nothing), leave = list it in the log and mute nothing")
     ap.add_argument("--list-models", action="store_true", help="print the models of models.txt as JSON and exit")
     ap.add_argument("--version", action="version", version=f"ProfMute {__version__}")
     a = ap.parse_args()
@@ -903,6 +1005,15 @@ def main():
                      f"{stats['unsure']} uncertain.")
     if conflict_lines:
         print(f"    {len(conflict_lines)} conflict(s): heard by Whisper, not in the subtitles.")
+    decided = {}
+    if unresolved and a.unresolved == "ask":
+        if a.dry:
+            decided = {n: "would ask you (preview)" for n in range(len(unresolved))}
+        else:
+            more, decided = decide_unresolved(samples, words, cues, unresolved)
+            hits = sorted(hits + more)
+    unresolved_lines = [f"{stamp(cs)}  {label}  <-  {flat(cues[k][2])}" + (f"  ->  {decided[n]}" if n in decided else "")
+                        for n, (cs, _, label, k) in enumerate(unresolved)]
 
     # pad and merge overlaps
     spans = sorted((max(0.0, s - a.pad_before), e + a.pad_after, w, tag) for s, e, w, tag in hits)
@@ -927,15 +1038,15 @@ def main():
         if conflict_lines:
             f.write("\nCONFLICTS - heard by Whisper, not in the subtitles:\n" + "\n".join(conflict_lines) + "\n")
         if unresolved:
-            f.write("\nUNRESOLVED - in the subtitles but not heard in the audio. NOT muted, check by ear:\n")
-            for cs, _, label, k in unresolved:
-                f.write(f"{stamp(cs)}  {label}  <-  {flat(cues[k][2])}\n")
+            f.write("\nUNRESOLVED - in the subtitles but not heard in the audio. "
+                    + ("Not muted unless the line says so; check by ear:\n" if decided else "NOT muted, check by ear:\n")
+                    + "\n".join(unresolved_lines) + "\n")
         f.write("\n" + "\n".join(notes) + "\n")
     print(f"Found {len(merged)} spots to mute. Log: {log}")
     for line in conflict_lines:
         print(f"    CONFLICT   {line}")
-    for cs, _, label, k in unresolved:
-        print(f"    UNRESOLVED {stamp(cs)}  {label}  <-  {flat(cues[k][2])}")
+    for line in unresolved_lines:
+        print(f"    UNRESOLVED {line}")
     if a.dry or not merged:
         return
 

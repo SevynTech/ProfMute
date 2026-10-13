@@ -18,7 +18,7 @@ APP = DIST / "ProfMute"
 CSC = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
 COPY = ["profmute.py", "profmute_gui.py", "profmute.ico", "pyproject.toml", "uv.lock",
-        "README.md", "LICENSE", "THIRD-PARTY-NOTICES.md",
+        "README.md", "CHANGELOG.md", "LICENSE", "THIRD-PARTY-NOTICES.md",
         "launcher/ProfMute.cs", "launcher/make_icon.py",
         "licenses/uv-LICENSE-MIT.txt", "licenses/uv-LICENSE-APACHE.txt"]
 
