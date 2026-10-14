@@ -40,10 +40,11 @@ ExtraDiskSpaceRequired=2500000000
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\ProfMute\*"; DestDir: "{app}"; Excludes: "words.txt,models.txt"; Flags: recursesubdirs ignoreversion
+Source: "..\dist\ProfMute\*"; DestDir: "{app}"; Excludes: "words.txt,models.txt,voice-models.txt"; Flags: recursesubdirs ignoreversion
 ; the lists people edit: never overwrite their copy when a newer version is installed over an old one
 Source: "..\dist\ProfMute\words.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "..\dist\ProfMute\models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
+Source: "..\dist\ProfMute\voice-models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
 Name: "{autoprograms}\ProfMute"; Filename: "{app}\ProfMute.exe"; WorkingDir: "{app}"
