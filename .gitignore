@@ -16,6 +16,8 @@ profmute_gui.json
 
 # Your own copies of the editable lists (the defaults live in profmute.py)
 words.txt
+voice-models.txt
+voice-models/
 models.txt
 
 # Built or downloaded, not source
@@ -26,3 +28,6 @@ dist/
 tools/
 ProfMute.exe
 __pycache__/
+
+# Listening comparisons made for testing
+listening-test/

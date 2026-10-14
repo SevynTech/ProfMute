@@ -54,7 +54,7 @@ Name: "{autodesktop}\ProfMute"; Filename: "{app}\ProfMute.exe"; WorkingDir: "{ap
 Type: files; Name: "{app}\.venv\profmute-ready"
 
 [Run]
-Filename: "{app}\ProfMute.exe"; Parameters: "--setup"; StatusMsg: "Downloading Python and the speech recognition libraries, about 2.2 GB..."; Flags: waituntilterminated; BeforeInstall: Downloading(True); AfterInstall: Downloading(False)
+Filename: "{app}\ProfMute.exe"; Parameters: "--setup"; StatusMsg: "Downloading Python and the speech recognition and voice removal libraries, about 4.5 GB..."; Flags: waituntilterminated; BeforeInstall: Downloading(True); AfterInstall: Downloading(False)
 Filename: "{app}\ProfMute.exe"; Description: "Open ProfMute now"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -71,7 +71,9 @@ end;
 ; what ProfMute downloaded or wrote by itself. The log folder is left alone: those are the user's records.
 Type: filesandordirs; Name: "{app}\.venv"
 Type: filesandordirs; Name: "{app}\python"
+Type: filesandordirs; Name: "{app}\voice-models"
 Type: filesandordirs; Name: "{app}\__pycache__"
+Type: filesandordirs; Name: "{app}\voice_separation\__pycache__"
 Type: filesandordirs; Name: "{app}\launcher\__pycache__"
 Type: files; Name: "{app}\profmute_gui.json"
 Type: files; Name: "{app}\setup-log.txt"

@@ -19,6 +19,8 @@ CSC = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
 
 COPY = ["profmute.py", "profmute_gui.py", "profmute.ico", "pyproject.toml", "uv.lock",
         "README.md", "CHANGELOG.md", "LICENSE", "THIRD-PARTY-NOTICES.md",
+        "voice_separation/__init__.py", "voice_separation/attend.py", "voice_separation/bs_roformer.py",
+        "voice_separation/mel_band_roformer.py", "voice_separation/LICENSE",
         "launcher/ProfMute.cs", "launcher/make_icon.py",
         "licenses/uv-LICENSE-MIT.txt", "licenses/uv-LICENSE-APACHE.txt"]
 
@@ -79,6 +81,7 @@ def main():
     # the editable lists ship as their defaults, whatever this PC's own copies say
     (APP / "words.txt").write_text(profmute.DEFAULT_WORDS, encoding="utf-8", newline="\r\n")
     (APP / "models.txt").write_text(profmute.DEFAULT_MODELS, encoding="utf-8", newline="\r\n")
+    (APP / "voice-models.txt").write_text(profmute.DEFAULT_VOICE_MODELS, encoding="utf-8", newline="\r\n")
     uv = shutil.which("uv")
     if not uv:
         sys.exit("uv.exe not found on this PC; it is needed in the package for first-time setup")

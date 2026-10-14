@@ -25,6 +25,7 @@ SETTINGS = HERE / "profmute_gui.json"   # remembers the choices made in the wind
 ICON = HERE / "profmute.ico"
 WORDS = HERE / "words.txt"
 MODELS = HERE / "models.txt"
+VOICE_MODELS = HERE / "voice-models.txt"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".webm")
@@ -81,6 +82,10 @@ TIPS = {
     "model": "The speech recognition model that listens to the movie. Bigger models hear more accurately but are "
              "slower and a bigger download. A model downloads itself the first time it is used.\n\n"
              "On a PC without an NVIDIA graphics card, pick a small one.",
+    "voice_model": "The AI model that takes the voice out of a muted moment while keeping the music and effects, "
+                   "when \"Remove only the voice with AI\" is on.\n\nThe recommended one sounded best in testing; "
+                   "the other is a second choice. A model downloads itself the first time it is used. The list "
+                   "comes from voice-models.txt next to ProfMute.",
     "padding": "Extra silence added around each muted word, because speech recognition marks where a word "
                "starts and ends only roughly.",
     "pad_before": "Seconds of extra silence before each muted word.\n\nRaise it if you can hear the start of a "
@@ -91,6 +96,27 @@ TIPS = {
     "cancel": "Stop the run. A clean copy that was only half written is deleted. Your original movie is never touched.",
     "dark": "Switch the window between dark and light colours.",
 }
+FADE_TIP = ("On: the sound fades out over a few hundredths of a second just before each muted word and fades "
+            "back in just after it, so the mute starts and ends smoothly instead of with a click. The word itself "
+            "stays fully silent.\n\nOff: the sound switches off and on instantly.")
+DIALOGUE_TIP = ("For movies with surround sound (5.1, 7.1 and similar), where the dialogue has a channel of its own.\n\n"
+                "On: only that dialogue (centre) channel is silenced for each word, so music and sound effects in "
+                "the other speakers keep playing.\n"
+                "Off: every channel is silenced, so music and effects drop out with the word too.\n\n"
+                "Stereo movies have no separate dialogue channel, so all of their sound is changed. If you can still "
+                "faintly hear a word in some movie, its mix puts some dialogue in the other speakers too: turn this off.")
+FRONT_TIP = ("Some surround mixes put a little of the dialogue in the front left and right speakers too, so a "
+             "word silenced in the centre channel can still be faintly heard.\n\n"
+             "On: for every word, ProfMute also listens to the front left and right speakers on their own. Where "
+             "it hears the word there too, it changes those speakers as well for that word.\n"
+             "Off: only the centre channel is changed.\n\n"
+             "Only used with \"Mute only the dialogue channel\" on a surround movie. Takes a little longer.")
+SEPARATE_TIP = ("On: instead of silencing a word, an AI voice model takes only the voice out of those moments, "
+                "so the music and sound effects underneath keep playing. It works on stereo movies too, and on a "
+                "surround movie it works on whichever speakers are being changed.\n"
+                "Off: the words are silenced.\n\n"
+                "The voice model downloads itself the first time it is used (about 1 GB). With an NVIDIA graphics "
+                "card it adds about half a minute to a movie; on the processor alone it takes much longer.")
 PREVIEW_TIP = ("A trial run. ProfMute does all the listening and writes the log, so you can see what it would "
                "mute, but it writes no video and no subtitle file, and it never stops to ask you anything.")
 SKIP_TIP = ("On: a movie whose clean copy already exists is left alone, so a batch that was interrupted can "
@@ -149,6 +175,11 @@ def model_label(row):
     flag = "   (unknown model name)" if row.get("problem") else \
            "   (downloads on first use)" if row.get("downloaded") is False else ""
     return f"{row['name']}   -   {size_text(row.get('size'))}   -   {row['note']}{flag}"
+
+
+def voice_label(row, recommended):
+    flag = "   (downloads on first use)" if row.get("downloaded") is False else ""
+    return f"{row['name']}   -   {size_text(row.get('size'))}" + ("   -   recommended" if recommended else "") + flag
 
 
 def is_our_output(path):
@@ -229,7 +260,8 @@ class App(ttk.Frame):
         self.model_rows = []
 
         settings = load_settings()
-        for path, default in ((WORDS, profmute.DEFAULT_WORDS), (MODELS, profmute.DEFAULT_MODELS)):
+        for path, default in ((WORDS, profmute.DEFAULT_WORDS), (MODELS, profmute.DEFAULT_MODELS),
+                              (VOICE_MODELS, profmute.DEFAULT_VOICE_MODELS)):
             if not path.exists():  # put the editable files where people will look for them
                 try:
                     path.write_text(default, encoding="utf-8")
@@ -249,6 +281,10 @@ class App(ttk.Frame):
         self.log_beside = tk.BooleanVar(value=bool(settings.get("log_beside", True)))
         self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", False)))
         self.ask_unresolved = tk.BooleanVar(value=bool(settings.get("ask_unresolved", False)))
+        self.fade = tk.BooleanVar(value=bool(settings.get("fade", True)))
+        self.dialogue_only = tk.BooleanVar(value=bool(settings.get("dialogue_only", True)))
+        self.front_check = tk.BooleanVar(value=bool(settings.get("front_check", True)))
+        self.separate = tk.BooleanVar(value=bool(settings.get("separate", True)))
         self.dry = tk.BooleanVar()
         self.dark = tk.BooleanVar(value=saved_dark())
         self.pad_before = tk.StringVar(value=f"{profmute.PAD_BEFORE:.2f}")
@@ -346,11 +382,26 @@ class App(ttk.Frame):
         self.show_models([{"name": name, "note": note, **cached.get(name, {})} for name, note in profmute.load_models()],
                          settings.get("model"))
 
+        voice_label = ttk.Label(self, text="Voice model")
+        voice_label.grid(row=5, column=0, sticky="w", pady=4)
+        self.voice_box = ttk.Combobox(self, state="readonly")
+        self.voice_box.bind("<<ComboboxSelected>>", self.voice_changed)
+        self.voice_box.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 0))
+        for w in (voice_label, self.voice_box):
+            Tooltip(w, TIPS["voice_model"])
+        self.inputs.append(self.voice_box)
+        self.voice_rows = []
+        cached = settings.get("voice_models") if isinstance(settings.get("voice_models"), dict) else {}
+        self.show_voice_models([{"name": m[0], **cached.get(m[0], {})} for m in profmute.load_voice_models()],
+                               settings.get("voice_model"))
+        if not self.separate.get():
+            self.voice_box.configure(state="disabled")
+
         pad_label = ttk.Label(self, text="Padding (seconds)")
-        pad_label.grid(row=5, column=0, sticky="w", pady=4)
+        pad_label.grid(row=6, column=0, sticky="w", pady=4)
         Tooltip(pad_label, TIPS["padding"])
         pads = ttk.Frame(self)
-        pads.grid(row=5, column=1, columnspan=2, sticky="w", padx=8)
+        pads.grid(row=6, column=1, columnspan=2, sticky="w", padx=8)
         for text, var, tip in (("before the word", self.pad_before, "pad_before"), ("after the word", self.pad_after, "pad_after")):
             spin = ttk.Spinbox(pads, textvariable=var, from_=0.0, to=2.0, increment=0.05, width=6, format="%.2f")
             spin.pack(side="left")
@@ -360,23 +411,30 @@ class App(ttk.Frame):
                 Tooltip(w, TIPS[tip])
             self.inputs.append(spin)
 
-        confirm = ttk.Checkbutton(self, text="Confirm each word with a second listen", variable=self.confirm,
-                                  command=lambda: save_settings(confirm=self.confirm.get()))
-        confirm.grid(row=6, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
-        Tooltip(confirm, CONFIRM_TIP)
-        unresolved = ttk.Checkbutton(self, text="Let me hear and decide unresolved words (in the subtitles, but not heard)",
-                                     variable=self.ask_unresolved,
-                                     command=lambda: save_settings(ask_unresolved=self.ask_unresolved.get()))
-        unresolved.grid(row=7, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        Tooltip(unresolved, UNRESOLVED_TIP)
-        dry = ttk.Checkbutton(self, text="Preview only: list the words in the log, write no video or subtitles",
-                              variable=self.dry, command=self.dry_changed)
-        dry.grid(row=8, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        Tooltip(dry, PREVIEW_TIP)
-        self.inputs += [confirm, unresolved, dry]
+        # the options, in two columns: how the words are found (left), how they are muted (right)
+        boxes = ttk.Frame(self)
+        boxes.grid(row=7, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
+        remember = lambda key, var: (lambda: save_settings(**{key: var.get()}))
+        options = [
+            (0, 0, "Confirm each word with a second listen", self.confirm, remember("confirm", self.confirm), CONFIRM_TIP),
+            (1, 0, "Let me hear and decide unresolved words", self.ask_unresolved,
+             remember("ask_unresolved", self.ask_unresolved), UNRESOLVED_TIP),
+            (2, 0, "Preview only: write the log, no video", self.dry, self.dry_changed, PREVIEW_TIP),
+            (0, 1, "Fade in and out at each mute", self.fade, remember("fade", self.fade), FADE_TIP),
+            (1, 1, "Mute only the dialogue channel (surround)", self.dialogue_only,
+             remember("dialogue_only", self.dialogue_only), DIALOGUE_TIP),
+            (2, 1, "Check the front left/right speakers too", self.front_check,
+             remember("front_check", self.front_check), FRONT_TIP),
+            (3, 1, "Remove only the voice with AI (keeps music)", self.separate, self.separate_changed, SEPARATE_TIP),
+        ]
+        for r, c, text, var, command, tip in options:
+            box = ttk.Checkbutton(boxes, text=text, variable=var, command=command)
+            box.grid(row=r, column=c, sticky="w", padx=(0, 36), pady=(0 if r == 0 else 4, 0))
+            Tooltip(box, tip)
+            self.inputs.append(box)
 
         bar = ttk.Frame(self)
-        bar.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(12, 6))
+        bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(12, 6))
         self.start_btn = ttk.Button(bar, text="Start", command=self.start)
         self.start_btn.pack(side="left")
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel, state="disabled")
@@ -388,7 +446,7 @@ class App(ttk.Frame):
             Tooltip(w, TIPS[tip])
 
         pane = ttk.Frame(self)
-        pane.grid(row=10, column=0, columnspan=3, sticky="nsew")
+        pane.grid(row=9, column=0, columnspan=3, sticky="nsew")
         self.text = tk.Text(pane, height=10, wrap="word", state="disabled", font=("Consolas", 10))
         scroll = ttk.Scrollbar(pane, command=self.text.yview)
         scroll.pack(side="right", fill="y")
@@ -396,7 +454,7 @@ class App(ttk.Frame):
         self.text.configure(yscrollcommand=scroll.set)
 
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(10, weight=1)
+        self.rowconfigure(9, weight=1)
         self.show_log_box()
         self.movie.trace_add("write", self.movie_changed)
         self.out.trace_add("write", self.out_changed)
@@ -489,8 +547,9 @@ class App(ttk.Frame):
                         selectbackground="SystemHighlight", selectforeground="SystemHighlightText")
         s.configure("Big.TLabel", font=("Segoe UI", 12, "bold"))
         # the model list that drops down is a plain listbox the themes do not reach
-        popdown = self.tk.call("ttk::combobox::PopdownWindow", self.model_box)
-        self.tk.call(f"{popdown}.f.l", "configure", *(x for k, v in drop.items() for x in ("-" + k, v)))
+        for box in (self.model_box, self.voice_box):
+            popdown = self.tk.call("ttk::combobox::PopdownWindow", box)
+            self.tk.call(f"{popdown}.f.l", "configure", *(x for k, v in drop.items() for x in ("-" + k, v)))
         self.title_bar(self.root)
 
     def title_bar(self, window):
@@ -523,14 +582,34 @@ class App(ttk.Frame):
 
     def fetch_models(self):
         """In a thread: ask the script which models are downloaded and how big they are (it knows; we do not)."""
-        try:
-            r = subprocess.run([self.python(), str(SCRIPT), "--list-models"], capture_output=True, text=True,
-                               cwd=HERE, creationflags=NO_WINDOW, timeout=120)
-            rows = json.loads(r.stdout.strip().splitlines()[-1])
-            if rows and all("name" in row and "note" in row for row in rows):
-                self.q.put(("models", rows))
-        except Exception:
-            pass  # offline or anything else: the list from models.txt, with remembered sizes, stays
+        for option, kind, needed in (("--list-models", "models", ("name", "note")), ("--list-voice-models", "voice_models", ("name",))):
+            try:
+                r = subprocess.run([self.python(), str(SCRIPT), option], capture_output=True, text=True,
+                                   cwd=HERE, creationflags=NO_WINDOW, timeout=120)
+                rows = json.loads(r.stdout.strip().splitlines()[-1])
+                if rows and all(all(k in row for k in needed) for row in rows):
+                    self.q.put((kind, rows))
+            except Exception:
+                pass  # offline or anything else: the lists from the text files, with remembered sizes, stay
+
+    def voice_model(self):
+        return self.voice_rows[self.voice_box.current()]["name"] if self.voice_rows else None
+
+    def voice_changed(self, _event=None):
+        self.voice_box.selection_clear()
+        save_settings(voice_model=self.voice_model())
+
+    def show_voice_models(self, rows, selected=None):
+        selected = selected or self.voice_model()
+        names = [r["name"] for r in rows]
+        self.voice_rows = rows
+        self.voice_box.configure(values=[voice_label(r, i == 0) for i, r in enumerate(rows)])
+        if rows:
+            self.voice_box.current(names.index(selected) if selected in names else 0)
+
+    def separate_changed(self):
+        save_settings(separate=self.separate.get())
+        self.voice_box.configure(state="readonly" if self.separate.get() and not self.proc else "disabled")
 
     def browse_words(self):
         p = filedialog.askopenfilename(title="Choose the word list", filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -734,7 +813,10 @@ class App(ttk.Frame):
         return (["--log-dir", log_dir] if log_box else []) + \
                ["--words", words, "--model", self.model(), "--pad-before", str(pads[0]),
                 "--pad-after", str(pads[1])] + (["--confirm"] if self.confirm.get() else []) + \
-               (["--unresolved", "ask"] if self.ask_unresolved.get() else []) + (["--dry"] if self.dry.get() else [])
+               (["--unresolved", "ask"] if self.ask_unresolved.get() else []) + (["--dry"] if self.dry.get() else []) + \
+               ([] if self.fade.get() else ["--no-fade"]) + ([] if self.dialogue_only.get() else ["--all-channels"]) + \
+               ([] if self.front_check.get() else ["--no-front-check"]) + \
+               (["--voice-model", self.voice_model()] if self.separate.get() and self.voice_model() else ["--no-separate"])
 
     def command(self, movie):
         return [self.python(), "-u", str(SCRIPT), str(movie)]
@@ -883,6 +965,10 @@ class App(ttk.Frame):
                     self.show_models(item[1])
                     save_settings(models={r["name"]: {"size": r.get("size"), "downloaded": r.get("downloaded")}
                                           for r in item[1]})
+                elif item[0] == "voice_models":
+                    self.show_voice_models(item[1])
+                    save_settings(voice_models={r["name"]: {"size": r.get("size"), "downloaded": r.get("downloaded")}
+                                                for r in item[1]})
                 elif item[0] == "ffmpeg":
                     self.start_btn.configure(state="normal")
                     self.status.set("ffmpeg is installed. Press Start again." if item[1] else "ffmpeg was not installed.")
@@ -1081,7 +1167,9 @@ class App(ttk.Frame):
 
     def set_running(self, running):
         for w in self.inputs:
-            w.configure(state="disabled" if running else "readonly" if w is self.model_box else "normal")
+            w.configure(state="disabled" if running else "readonly" if w in (self.model_box, self.voice_box) else "normal")
+        if not running and not self.separate.get():
+            self.voice_box.configure(state="disabled")
         if not running:
             self.dry_changed()
             self.show_log_box()
@@ -1119,7 +1207,7 @@ def main():
         pass
     root = tk.Tk()
     root.title(f"ProfMute {profmute.__version__}")
-    root.minsize(860, 850)
+    root.minsize(860, 900)
     if ICON.is_file():
         root.iconbitmap(default=str(ICON))
     App(root).pack(fill="both", expand=True)

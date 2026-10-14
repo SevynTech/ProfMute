@@ -17,7 +17,9 @@ Everything runs on your own PC. Nothing about your movies is sent anywhere.
 ## What you need
 
 - Windows 10 or 11, 64-bit.
-- About 6 GB of free disk space (2.2 GB of libraries plus 3.1 GB for the default speech model).
+- About 16 GB of free disk space: 7 GB of libraries, 3.1 GB for the default speech model, 0.9 GB
+  for the voice removal model, and room for the sound track while it is being cleaned (up to 5 GB
+  for a long surround movie, removed afterwards).
 - An internet connection for the first run.
 - **A graphics card from NVIDIA is strongly recommended.** With one, a two-hour movie takes
   roughly 10 to 15 minutes. Without one ProfMute still works, on the processor, but the default
@@ -31,12 +33,12 @@ Both downloads are on the [latest release](https://github.com/SevynTech/ProfMute
 
 **With the installer (easiest).** Download the `ProfMute-Setup` exe and run it. It installs for
 your Windows account only, so it needs no administrator rights. Its last step downloads Python and
-the speech recognition libraries (about 2.2 GB), which takes a few minutes. ProfMute is then in the
-Start menu. To remove it, use Windows Settings > Apps > Installed apps.
+the speech recognition and voice removal libraries (about 4.5 GB), which takes a few minutes.
+ProfMute is then in the Start menu. To remove it, use Windows Settings > Apps > Installed apps.
 
 **From the zip (nothing is installed).** Download the `ProfMute` zip, unzip the `ProfMute`
 folder somewhere you can write to, such as `Documents` (not `Program Files`), and double-click
-`ProfMute.exe`. The first time, it asks to download the same 2.2 GB into that folder. To remove
+`ProfMute.exe`. The first time, it asks to download the same 4.5 GB into that folder. To remove
 it, delete the folder.
 
 Windows may show "Windows protected your PC" because neither file is signed. Choose **More info**,
@@ -82,6 +84,40 @@ clean copy are skipped, so an interrupted batch can simply be started again.
   "after the word".
 - **Confirm each word with a second listen**: see below.
 - **Preview only**: writes only the log, so you can see what would be muted.
+- **Fade in and out at each mute**, **Mute only the dialogue channel**, **Check the front
+  left/right speakers too**, **Remove only the voice with AI** and **Voice model**: see
+  [How a muted word sounds](#how-a-muted-word-sounds).
+
+## How a muted word sounds
+
+Older versions silenced the whole sound track for each word, so the music and effects dropped out
+with it. Now, with every option on (the default), only the voice goes:
+
+- **Fades.** Each mute fades out and back in over 30 ms instead of switching off and on, so there
+  is no click. The fades sit in the padding; the word itself is fully muted.
+- **Dialogue channel.** In a 5.1 or 7.1 movie, dialogue is almost always in the centre speaker, so
+  only that channel is changed; the music and effects in the other speakers keep playing. Stereo
+  and mono movies have no separate dialogue channel, so the voice removal below does the work.
+- **Front left/right check.** Some mixes put part of the dialogue in the front left and right
+  speakers too. ProfMute listens to those two speakers on their own around each muted word, and
+  where Whisper hears the word there, it changes those speakers as well. The log says how many
+  words that was.
+- **Remove only the voice with AI.** Around each muted word, an AI model splits the sound into the
+  voice and everything else, and the word is replaced with everything else, so music and effects
+  continue underneath. Only the few seconds around each word are processed, not the whole movie,
+  which takes about a minute per movie with an NVIDIA graphics card and roughly ten minutes
+  without one. Untick it and the changed channels are silenced instead.
+
+The voice models are listed in `voice-models.txt`, next to `ProfMute.exe`, and each is downloaded
+the first time it is used:
+
+| Voice model | Download | |
+|---|---|---|
+| Kim MelBand RoFormer | 0.9 GB | the default: removed the voice most completely in our tests |
+| viperx BS RoFormer | 0.6 GB | a second choice; try it if a word can still be heard |
+
+If the voice removal cannot run (no model, no internet on first use), the word is silenced
+instead and the log says why.
 
 ## How sure is it?
 
@@ -203,6 +239,7 @@ It compiles the small launcher (`launcher\ProfMute.cs`), copies an explicit list
 ## License
 
 ProfMute is released under the MIT license; see `LICENSE`. It builds on faster-whisper,
-CTranslate2, OpenAI's Whisper models, ffmpeg and uv; see `THIRD-PARTY-NOTICES.md`.
+CTranslate2, OpenAI's Whisper models, PyTorch, the voice separation code and models from
+Music-Source-Separation-Training and their authors, ffmpeg and uv; see `THIRD-PARTY-NOTICES.md`.
 
 Use it on media you have the right to copy and modify.

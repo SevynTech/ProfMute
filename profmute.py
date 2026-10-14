@@ -4,6 +4,7 @@ Usage:  uv run python profmute.py "C:\\path\\movie.mkv" [--dry] [--srt subs.srt 
                                  [--out clean.mkv] [--out-srt clean.srt] [--log-dir folder] [--words words.txt]
                                  [--pad-before 0.02] [--pad-after 0.30] [--device auto|cuda|cpu]
                                  [--confirm] [--conflicts ask|auto] [--unresolved ask|leave]
+                                 [--no-fade] [--all-channels] [--no-front-check] [--no-separate] [--voice-model NAME]
 Output: <name>.clean.mkv next to the original (or --out), and a log of the muted words,
         <name>.profmute.txt, in a "log" folder next to this program (or --log-dir).
         The original file is never modified.
@@ -21,11 +22,11 @@ decide, --conflicts auto lets three listens decide. --confirm double-checks wher
 Subtitle lookup order: --srt, then <name>.en.srt / <name>.srt next to the movie, then an English
 text subtitle track inside the file.
 """
-import argparse, bisect, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, bisect, gc, json, os, re, shutil, subprocess, sys, tempfile
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -122,12 +123,25 @@ base.en | very fast, misses many words
 tiny.en | fastest, least accurate
 """
 
+# ---- Likewise for voice-models.txt: the AI models that take the voice out of a muted stretch while the
+# ---- music and effects keep playing. Download locations are listed here only as defaults; edit the file.
+DEFAULT_VOICE_MODELS = """# ProfMute voice model list: AI models that remove the voice but keep the music and sound effects.
+# One model per line:   name | architecture | weights address | settings address
+# The first line is the default. A model downloads itself into the "voice-models" folder next to
+# ProfMute the first time it is used. architecture is mel_band_roformer or bs_roformer.
+Kim MelBand RoFormer | mel_band_roformer | https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt | https://raw.githubusercontent.com/ZFTurbo/Music-Source-Separation-Training/5a3e16d1f7e6ac489bddbeb25069595527e170ce/configs/KimberleyJensen/config_vocals_mel_band_roformer_kj.yaml
+viperx BS RoFormer | bs_roformer | https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/model_bs_roformer_ep_317_sdr_12.9755.ckpt | https://raw.githubusercontent.com/ZFTurbo/Music-Source-Separation-Training/5a3e16d1f7e6ac489bddbeb25069595527e170ce/configs/viperx/model_bs_roformer_ep_317_sdr_12.9755.yaml
+"""
+VOICE_DIR = HERE / "voice-models"
+CONTEXT = 3.0   # seconds of sound around a muted word that the voice model hears, so it can tell voice from music
+
 MAX_GAP = 1.0  # seconds; phrase words further apart than this are not treated as a phrase
 
 # ---- EDIT HERE: seconds of extra silence around each word (also --pad-before / --pad-after) ----
 # Whisper tends to mark a word's start about right and its end too early, so most of the padding goes after.
 PAD_BEFORE = 0.02
 PAD_AFTER = 0.30
+FADE = 0.03   # seconds the sound takes to fade out before a mute and back in after it (--no-fade: none)
 
 SR = 16000           # sample rate Whisper wants
 SRT_TOL = 1.5        # seconds; a subtitle hit counts as heard if Whisper has a hit this close to the line
@@ -206,6 +220,306 @@ def load_audio(src, audio_index, filters=""):
              "-af", (filters + "," if filters else "") + "aresample=async=1:first_pts=0", str(wav)])
         with wave.open(str(wav), "rb") as wf:
             return np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768.0
+
+
+# ---------------------------------------------------------------- voice models
+
+def load_voice_models():
+    """The voice models offered, from voice-models.txt next to the program: [(name, architecture, weights, settings)]"""
+    def read(text):
+        rows = [[part.strip() for part in line.split("|")] for line in map(str.strip, text.splitlines())
+                if line and not line.startswith("#")]
+        return [tuple(r) for r in rows if len(r) == 4 and all(r)]
+    p = HERE / "voice-models.txt"
+    return (read(read_text(p)) if p.is_file() else []) or read(DEFAULT_VOICE_MODELS)
+
+
+def voice_model_files(name):
+    folder = VOICE_DIR / re.sub(r"[^\w.-]+", "_", name)
+    return folder / "model.ckpt", folder / "settings.yaml"
+
+
+def fetch(url, dest, label):
+    """Download url to dest, showing progress; nothing is left behind if it fails."""
+    import urllib.request
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    request = urllib.request.Request(url, headers={"User-Agent": "ProfMute"})
+    with urllib.request.urlopen(request, timeout=60) as r, open(part, "wb") as f:
+        total, done, shown = int(r.headers.get("Content-Length") or 0), 0, -1
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+            done += len(chunk)
+            if total > 5e6 and done * 100 // total != shown:
+                shown = done * 100 // total
+                print(f"\r    downloading {label}: {shown:3d}% of {total / 1e9:.1f} GB", end="", flush=True)
+    if total > 5e6:
+        print()
+    os.replace(part, dest)
+
+
+def download_size(url):
+    """How big a download is, without downloading it (None when unknown or offline)."""
+    import urllib.request
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "ProfMute", "Range": "bytes=0-0"})
+        with urllib.request.urlopen(request, timeout=6) as r:
+            whole = (r.headers.get("Content-Range") or "").rpartition("/")[2]
+            return int(whole) if whole.isdigit() else int(r.headers.get("Content-Length") or 0) or None
+    except Exception:
+        return None
+
+
+def list_voice_models():
+    out = []
+    for name, _, weights, _ in load_voice_models():
+        out.append({"name": name, "downloaded": voice_model_files(name)[0].is_file(), "size": download_size(weights)})
+    return out
+
+
+class VoiceRemover:
+    """A voice model, downloaded on first use, that takes the voice out of a sound and keeps the rest."""
+
+    def __init__(self, name):
+        import torch, yaml
+        entry = next((m for m in load_voice_models() if m[0] == name), None)
+        if entry is None:
+            raise ValueError(f"no voice model called {name!r} in voice-models.txt")
+        _, architecture, weights_url, settings_url = entry
+        weights, settings = voice_model_files(name)
+        if not settings.is_file():
+            fetch(settings_url, settings, f"{name} settings")
+        if not weights.is_file():
+            fetch(weights_url, weights, name)
+        with open(settings, encoding="utf-8") as f:
+            cfg = yaml.load(f, Loader=yaml.FullLoader)
+        from voice_separation import build_model
+        self.model = build_model(architecture, dict(cfg["model"]))
+        state = torch.load(weights, map_location="cpu", weights_only=True)
+        for key in ("state", "state_dict", "model_state_dict"):
+            if isinstance(state, dict) and key in state:
+                state = state[key]
+        self.model.load_state_dict(state)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device).eval()
+        audio, inference = cfg["audio"], cfg.get("inference", {})
+        self.rate = int(audio["sample_rate"])
+        self.chunk = int(inference.get("chunk_size", audio["chunk_size"]))
+        self.overlap = int(inference.get("num_overlap", 2))
+        self.amp = bool(cfg.get("training", {}).get("use_amp", True))
+        self.name = name
+
+    def voice_free(self, audio, rate):
+        """audio = samples x channels (1 or 2) at `rate` -> the same sound with the voice taken out."""
+        import numpy as np, torch, torchaudio
+        from voice_separation import separate
+        mix = torch.from_numpy(np.ascontiguousarray(audio.T, dtype=np.float32)).to(self.device)
+        if mix.shape[0] == 1:
+            mix = mix.repeat(2, 1)                       # the models are trained on stereo
+        mix = torchaudio.functional.resample(mix, rate, self.rate)
+        voice = separate(self.model, mix, self.chunk, self.overlap, self.amp)
+        free = torchaudio.functional.resample(mix - voice, self.rate, rate)
+        free = free[:, :len(audio)]
+        if free.shape[1] < len(audio):
+            free = torch.nn.functional.pad(free, (0, len(audio) - free.shape[1]))
+        if audio.shape[1] == 1:
+            free = free.mean(dim=0, keepdim=True)
+        return free.T.cpu().numpy()
+
+
+# ---------------------------------------------------------------- writing the clean audio
+
+LOSSLESS = ("truehd", "mlp", "flac", "alac", "wavpack", "tta") # decoded at 32 bits so nothing is lost
+_layouts = None
+
+
+def channel_names(layout, channels):
+    """The channels of an audio track in the order ffmpeg decodes them, e.g. ['FL', 'FR', 'FC', ...], or None."""
+    global _layouts
+    if "+" in layout:
+        names = layout.split("+")
+    else:
+        if _layouts is None:
+            listing = run([FFMPEG, "-hide_banner", "-layouts"]).stdout
+            table = listing.split("Standard channel layouts:")[-1].splitlines()
+            _layouts = dict(line.split()[:2] for line in table if len(line.split()) >= 2 and line.split()[0] != "NAME")
+        names = _layouts.get(layout, "").split("+")
+    return names if len(names) == channels and all(names) else None
+
+
+def mute_samples(data, rate, spans, ramp, fills=None):
+    """Take the words out of data (frames x channels), in place.
+
+    spans = [(start, end, channels), ...] in seconds. Inside a span those channels are replaced by
+    fills[i] (frames of that span's region x those channels: the same sound with the voice removed),
+    or by silence when there is no fill. With ramp > 0 the change fades in over `ramp` samples just
+    before each span and back out just after it (raised cosine), so the span itself is fully replaced.
+    Nothing else is touched.
+    """
+    import numpy as np
+    frames = len(data)
+    top = float(np.iinfo(data.dtype).max)
+    down = 0.5 + 0.5 * np.cos(np.pi * np.arange(1, ramp + 1) / ramp) if ramp else None   # just under 1 ... 0
+    for i, (s, e, targets) in enumerate(spans):
+        a, b = region(s, e, rate, ramp, frames)
+        if b <= a:
+            continue
+        gain = np.zeros(b - a, dtype=np.float64)
+        if ramp:
+            head = min(ramp, int(round(s * rate)) - a)          # fade samples that fit before the span
+            tail = min(ramp, b - int(round(e * rate)))          # fade samples that fit after it
+            gain[:head] = down[ramp - head:] if head < ramp else down
+            if tail > 0:
+                gain[len(gain) - tail:] = down[::-1][:tail]
+        block = data[a:b, targets].astype(np.float64) * gain[:, None]
+        if fills is not None and fills[i] is not None:
+            block += fills[i] * top * (1 - gain[:, None])
+        data[a:b, targets] = np.clip(np.round(block), -top - 1, top).astype(data.dtype)
+
+
+def region(s, e, rate, ramp, frames):
+    """The samples a span changes, fades included."""
+    return max(0, int(round(s * rate)) - ramp), min(frames, int(round(e * rate)) + ramp)
+
+
+def track_info(src, audio_index):
+    """(all streams, the audio track, its channel names or None) of a movie."""
+    streams = json.loads(run([FFPROBE, "-v", "error", "-show_entries",
+                              "stream=index,codec_type,codec_name,channels,channel_layout,sample_rate,bits_per_raw_sample:"
+                              "stream_disposition", "-of", "json", str(src)]).stdout)["streams"]
+    audio = [s for s in streams if s["codec_type"] == "audio"]
+    if audio_index >= len(audio):
+        sys.exit(f"the movie has no audio track number {audio_index}")
+    track = audio[audio_index]
+    layout = track.get("channel_layout", "")
+    return streams, track, channel_names(layout, int(track["channels"])) if layout else None
+
+
+FRONT = ("FL", "FR", "FLC", "FRC")   # where some mixes leak dialogue besides the centre
+PAIRS = (("FL", "FR"), ("FLC", "FRC"), ("BL", "BR"), ("SL", "SR"), ("TFL", "TFR"), ("TBL", "TBR"))
+
+
+def plan_channels(names, channels, dialogue_only):
+    """Which channels a mute changes.
+
+    -> (channels for every word, extra front channels for the words also heard there, words for the log)
+    """
+    if dialogue_only and names and "FC" in names and channels > 2:
+        front = [names.index(n) for n in FRONT if n in names]
+        return [names.index("FC")], front, "only the dialogue (centre) channel"
+    return list(range(channels)), [], "all channels"
+
+
+def groups(targets, names):
+    """Split channels into stereo pairs (left/right of one pair of speakers) and single channels, for the voice model."""
+    targets, out = list(targets), []
+    if names:
+        for left, right in PAIRS:
+            if left in names and right in names and names.index(left) in targets and names.index(right) in targets:
+                out.append([names.index(left), names.index(right)])
+                targets = [t for t in targets if t not in out[-1]]
+    elif len(targets) == 2:
+        return [targets]
+    return out + [[t] for t in targets]
+
+
+def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_front=(), voice=None):
+    """Write the clean copy: every stream of the movie copied as it is, except the cleaned audio track.
+
+    The track is decoded once to a temporary file on the output drive. Only the muted stretches are
+    changed, in place; everything else stays sample for sample as decoded.
+    dialogue_only: a surround track is changed in its centre (dialogue) channel only, plus its front
+    left/right for the spans whose index is in also_front (the word was heard there too).
+    voice: a VoiceRemover; the changed channels then keep their music and effects and lose only the voice.
+    fade: each change fades in just before its stretch and out just after it.
+    -> a sentence for the log saying how it was done
+    """
+    import numpy as np
+    streams, track, names = track_info(src, audio_index)
+    channels, rate = int(track["channels"]), int(track["sample_rate"])
+    layout = track.get("channel_layout", "")
+    wide = track["codec_name"] in LOSSLESS or int(track.get("bits_per_raw_sample") or 0) > 16
+    fmt, dtype = ("s32le", np.int32) if wide else ("s16le", np.int16)
+
+    base, front, where = plan_channels(names, channels, dialogue_only)
+    plan = [(s, e, base + (front if i in also_front else [])) for i, (s, e) in enumerate(spans)]
+    if dialogue_only and base == list(range(channels)):
+        where += f" (a {layout or str(channels) + '-channel'} track has no separate dialogue channel)"
+    else:
+        where += f" of the {layout} track" if base != list(range(channels)) else ""
+    if front and also_front:
+        where += f", plus front left/right at {len(set(also_front))} spot(s) where the word was heard there too"
+    how = f"Muting: {where}" + (f"; the voice removed by {voice.name}, music and effects kept" if voice else ", silenced") + \
+          (f", with {FADE * 1000:.0f} ms fades." if fade else ", without fades.")
+
+    duration = float(json.loads(run([FFPROBE, "-v", "error", "-show_entries", "format=duration", "-of", "json",
+                                     str(src)]).stdout)["format"]["duration"])
+    need = duration * rate * channels * np.dtype(dtype).itemsize
+    free = shutil.disk_usage(out.parent).free
+    if free < need * 1.1 + 200e6:
+        sys.exit(f"Not enough free space on the drive of {out.parent}: writing the clean audio needs a temporary "
+                 f"file of about {need / 1e9:.1f} GB plus the clean copy itself, and only {free / 1e9:.1f} GB is free.")
+
+    tmp = tempfile.mkdtemp(prefix=".profmute-", dir=out.parent)
+    try:
+        raw = os.path.join(tmp, "audio.raw")
+        run([FFMPEG, "-y", "-i", str(src), "-map", f"0:a:{audio_index}", "-af", "aresample=async=1:first_pts=0",
+             "-f", fmt, "-c:a", "pcm_" + fmt, raw])
+        data = np.memmap(raw, dtype=dtype, mode="r+")
+        data = data[:data.size - data.size % channels].reshape(-1, channels)
+        ramp, top = int(FADE * rate) if fade else 0, float(np.iinfo(dtype).max)
+        fills = None
+        if voice:
+            fills = []
+            for n, (s, e, targets) in enumerate(plan, 1):
+                print(f"\r    removing the voice {n}/{len(plan)}", end="", flush=True)
+                a, b = region(s, e, rate, ramp, len(data))
+                w0, w1 = max(0, a - int(CONTEXT * rate)), min(len(data), b + int(CONTEXT * rate))
+                fill = np.zeros((b - a, len(targets)), dtype=np.float64)
+                for group in groups(targets, names):
+                    sound = data[w0:w1, group].astype(np.float32) / top
+                    clean = voice.voice_free(sound, rate)[a - w0:b - w0]
+                    for k, c in enumerate(group):
+                        fill[:, targets.index(c)] = clean[:, k]
+                fills.append(fill)
+            print()
+        mute_samples(data, rate, plan, ramp, fills)
+        data.flush()
+        del data
+
+        # every stream of the movie in its own order, the cleaned track taken from the edited file instead
+        position = next(i for i, s in enumerate(streams) if s is track)
+        cmd = [FFMPEG, "-y", "-i", str(src), "-f", fmt, "-ar", str(rate)]
+        cmd += ["-ch_layout", layout] if names else ["-ac", str(channels)]
+        cmd += ["-i", raw]
+        for i, s in enumerate(streams):
+            cmd += ["-map", "1:a:0" if i == position else f"0:{s['index']}"]
+        # naming any stream's metadata switches off ffmpeg's automatic copy for all of them, so name each one
+        for i, s in enumerate(streams):
+            cmd += [f"-map_metadata:s:{i}", f"0:s:{s['index']}"]
+        flags = "+".join(k for k, v in (track.get("disposition") or {}).items() if v == 1) or "0"
+        cmd += ["-map_metadata", "0", "-map_chapters", "0", "-c", "copy", f"-disposition:a:{audio_index}", flags,
+                f"-c:a:{audio_index}", "aac", f"-b:a:{audio_index}", "384k", str(out)]
+        run(cmd)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return how
+
+
+def front_heard(model, src, audio_index, spans, names):
+    """Indexes of the spans whose word Whisper also hears in the front left/right speakers (centre left out)."""
+    if not names or "FC" not in names or "FL" not in names or "FR" not in names:
+        return set()
+    sides = load_audio(src, audio_index, "pan=mono|c0=0.5*FL+0.5*FR")
+    heard = set()
+    for i, (s, e, *_) in enumerate(spans):
+        print(f"\r    listening to the front left/right speakers {i + 1}/{len(spans)}", end="", flush=True)
+        a = max(0.0, s - 2)
+        found = find_hits(transcribe(model, sides[int(a * SR):int((e + 2) * SR)], a))
+        if any(overlaps(h, (s, e), 0) for h in found):
+            heard.add(i)
+    print()
+    return heard
 
 
 def stamp(t):
@@ -913,6 +1227,16 @@ def main():
     ap.add_argument("--log-dir", help='folder for the log (default: a "log" folder next to this program)')
     ap.add_argument("--pad-before", type=float, default=PAD_BEFORE, help="seconds muted before each word")
     ap.add_argument("--pad-after", type=float, default=PAD_AFTER, help="seconds muted after each word")
+    ap.add_argument("--no-fade", action="store_true",
+                    help=f"switch each mute on and off instantly, instead of fading over {FADE * 1000:.0f} ms just around it")
+    ap.add_argument("--all-channels", action="store_true",
+                    help="mute every channel of a surround track, not just its centre (dialogue) channel")
+    ap.add_argument("--no-front-check", action="store_true",
+                    help="do not listen for the words in the front left/right speakers of a surround track")
+    ap.add_argument("--no-separate", action="store_true",
+                    help="silence the words instead of removing only the voice with an AI voice model")
+    ap.add_argument("--voice-model", help="voice model to use (default: the first line of voice-models.txt)")
+    ap.add_argument("--list-voice-models", action="store_true", help="print the models of voice-models.txt as JSON and exit")
     ap.add_argument("--confirm", action="store_true", help="listen to every word a second time to check where it is")
     ap.add_argument("--conflicts", choices=("ask", "auto"), default="auto",
                     help="a word the subtitles do not have: ask = you decide, auto = three listens decide")
@@ -925,6 +1249,8 @@ def main():
     sys.stdout.reconfigure(errors="replace")
     if a.list_models:
         return print(json.dumps(list_models()))
+    if a.list_voice_models:
+        return print(json.dumps(list_voice_models()))
     if not a.file:
         ap.error("which movie?")
     if a.pad_before < 0 or a.pad_after < 0:
@@ -1026,6 +1352,17 @@ def main():
         else:
             merged.append((s, e, w, tag))
 
+    # some surround mixes put a little dialogue in the front left/right too: listen there for each word
+    also_front = set()
+    if merged and not a.all_channels and not a.no_front_check:
+        names = track_info(src, a.audio_index)[2]
+        if names and "FC" in names and len(names) > 2:
+            also_front = front_heard(model, src, a.audio_index, merged, names)
+            print(f"    {len(also_front)} word(s) also heard in the front left/right speakers; changed there too.")
+            notes.append(f"Front left/right check: the word was heard there too at {len(also_front)} of {len(merged)} spots.")
+            merged = [(s, e, w, ", ".join(filter(None, [tag, "also front left/right"])) if i in also_front else tag)
+                      for i, (s, e, w, tag) in enumerate(merged)]
+
     # subtitles with the same words deleted, written next to the clean copy once that exists
     srt_text = None
     if cues and merged and not a.dry:
@@ -1050,12 +1387,24 @@ def main():
     if a.dry or not merged:
         return
 
-    expr = "+".join(f"between(t,{s:.3f},{e:.3f})" for s, e, *_ in merged)
-    flt = f"volume=enable='{expr}':volume=0"
     print("4/4 Writing clean copy (video copied, only the audio is re-encoded)...")
-    run([FFMPEG, "-y", "-i", str(src), "-map", "0", "-c", "copy",
-         f"-filter:a:{a.audio_index}", flt,
-         f"-c:a:{a.audio_index}", "aac", f"-b:a:{a.audio_index}", "384k", str(out)])
+    voice, trouble = None, None
+    if not a.no_separate:
+        del model                     # Whisper is done: make room on the graphics card for the voice model
+        gc.collect()
+        name = a.voice_model or load_voice_models()[0][0]
+        try:
+            print(f"    Loading the voice model {name} (its first use downloads it)...")
+            voice = VoiceRemover(name)
+        except Exception as e:
+            trouble = f"The voice model {name} could not be used ({(str(e).strip().splitlines() or [type(e).__name__])[0][:200]}); " \
+                      f"the words were silenced instead."
+            print("    " + trouble)
+    how = write_clean_audio(src, out, a.audio_index, [m[:2] for m in merged], not a.no_fade, not a.all_channels,
+                            also_front, voice)
+    print("    " + how)
+    with open(log, "a", encoding="utf-8") as f:
+        f.write((trouble + "\n" if trouble else "") + how + "\n")
     print("Done:", out)
     if srt_text is None:
         print("No subtitles to clean, so no clean subtitle file was written.")
