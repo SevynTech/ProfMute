@@ -22,11 +22,11 @@ decide, --conflicts auto lets three listens decide. --confirm double-checks wher
 Subtitle lookup order: --srt, then <name>.en.srt / <name>.srt next to the movie, then an English
 text subtitle track inside the file.
 """
-import argparse, bisect, gc, json, os, re, shutil, subprocess, sys, tempfile
+import argparse, bisect, gc, json, os, re, secrets, shutil, subprocess, sys, tempfile
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -178,8 +178,9 @@ TEXT_SUBS = ("subrip", "ass", "ssa", "mov_text", "webvtt", "text")
 def run(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
-        print(r.stderr[-2000:])
-        sys.exit("command failed: " + " ".join(Path(cmd[0]).name if i == 0 else c for i, c in enumerate(cmd[:3])))
+        lines = [ln for ln in r.stderr.splitlines() if ln.strip() and not re.match(r"\s*(lib\w+\s+\d|configuration:|built with|ffmpeg version|ffprobe version)", ln)]
+        print("\n".join(lines[-3:]))            # the reason; not ffmpeg's version and build details before it
+        sys.exit(f"{Path(cmd[0]).stem} failed")
     return r
 
 
@@ -438,6 +439,20 @@ def groups(targets, names):
     return out + [[t] for t in targets]
 
 
+def work_folder(parent):
+    """A new, uniquely named folder for temporary files in `parent`. Made with the folder's normal permissions:
+    tempfile.mkdtemp (Python 3.12.4 and later, on Windows) locks a new folder to its owner, and on a network share
+    (a NAS) that can lock you out of it, so nothing can be written into it or deleted."""
+    for _ in range(100):
+        path = Path(parent) / f".profmute-{secrets.token_hex(4)}"
+        try:
+            path.mkdir()
+            return str(path)
+        except FileExistsError:
+            continue
+    raise OSError(f"could not make a temporary folder in {parent}")
+
+
 def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_front=(), voice=None, speaking=None):
     """Write the clean copy: every stream of the movie copied as it is, except the cleaned audio track.
 
@@ -477,7 +492,7 @@ def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_fr
         sys.exit(f"Not enough free space on the drive of {out.parent}: writing the clean audio needs a temporary "
                  f"file of about {need / 1e9:.1f} GB plus the clean copy itself, and only {free / 1e9:.1f} GB is free.")
 
-    tmp = tempfile.mkdtemp(prefix=".profmute-", dir=out.parent)
+    tmp = work_folder(out.parent)
     try:
         raw = os.path.join(tmp, "audio.raw")
         run([FFMPEG, "-y", "-i", str(src), "-map", f"0:a:{audio_index}", "-af", "aresample=async=1:first_pts=0",
@@ -558,9 +573,15 @@ def stamp(t):
     return f"{int(t // 3600):02d}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
+CONTRACTION = re.compile(r"(he|she|we|they|you|i|it|who|that|there|what)['’](ll|d|s|re|ve|m)")
+
+
 def norm(word):
-    """(raw, tok): lowercased with the outer punctuation stripped, and the letters only."""
+    """(raw, tok): lowercased with the outer punctuation stripped, and the letters only. A pronoun's
+    contraction keeps its apostrophe ("he'll"), so it is never read as a word on the list ("hell")."""
     raw = word.lower().strip(STRIP)
+    if CONTRACTION.fullmatch(raw):
+        return raw, raw.replace("’", "'")
     return raw, re.sub(r"[^a-z]", "", raw)
 
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.1 - 2026-10-16
+
+### Fixed
+
+- **Saving to a network share (a NAS) failed** with "Permission denied" when writing the clean
+  copy. The temporary folder made next to the clean copy was locked to its owner, which a NAS
+  can turn into "nobody". It is now made with the share's normal permissions. A failed run left
+  an empty `.profmute-…` folder that Windows cannot delete; delete it on the NAS itself.
+- "He'll" (and "she'd", "we're" and other contractions) is no longer read as a swear: "he'll" was
+  taken for "hell" and muted.
+- When ffmpeg fails, the messages show its reason only, not its long list of build options.
+
 ## 1.3.0 - 2026-10-15
 
 ### Added
