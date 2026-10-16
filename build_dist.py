@@ -21,6 +21,8 @@ COPY = ["profmute.py", "profmute_gui.py", "profmute.ico", "pyproject.toml", "uv.
         "README.md", "CHANGELOG.md", "LICENSE", "THIRD-PARTY-NOTICES.md",
         "voice_separation/__init__.py", "voice_separation/attend.py", "voice_separation/bs_roformer.py",
         "voice_separation/mel_band_roformer.py", "voice_separation/LICENSE",
+        "speak.py", "speak_stubs/tn/__init__.py", "speak_stubs/tn/chinese/__init__.py", "speak_stubs/tn/chinese/normalizer.py",
+        "speak_stubs/tn/english/__init__.py", "speak_stubs/tn/english/normalizer.py",
         "launcher/ProfMute.cs", "launcher/make_icon.py",
         "licenses/uv-LICENSE-MIT.txt", "licenses/uv-LICENSE-APACHE.txt"]
 

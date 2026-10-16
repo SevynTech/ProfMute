@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.3.0 - 2026-10-15
+
+### Added
+
+- **Speak a clean word in the actor's voice (experimental).** A new option, off by default: instead of a gap, a
+  swear in normal speech is replaced by a clean word said in the actor's own voice, inside their own
+  sentence ("get the heck out of my bar"). An AI model (Gemma 4 12B) picks a plain word that fits
+  the sentence, another (dots.tts) says it, Whisper checks it (up to three tries), and the new word
+  is cut in exactly where the swear was, over the music and effects. A word that comes out yelled
+  is tried again calmer, and muted if it still yells. The clean subtitles say the spoken word
+  ("Heck no."). Anything that fails the check stays muted; the log's new `SPOKEN` part says what
+  happened to each sentence. Needs an NVIDIA graphics card; the models (about 14 GB) download on
+  first use. On the command line: `--speak`.
+- **`[replacements]` in the word list:** `swear = clean word` lines choose the spoken word yourself;
+  they always win over the AI's choice.
+- The README lists every AI model ProfMute uses, what it does, its size and licence.
+- **Batch: pick from a whole library.** **Add folder...** now shows the folder as a tree of its
+  folders and movies, with a box on each row. Tick single movies or episodes, or tick a folder to
+  take a whole show or season; a partly ticked folder shows a partly filled box. New buttons
+  **Tick all** and **Untick all**, and Space ticks the selected rows. Only ticked movies are
+  cleaned. Works on network shares, so you can point it at the media folders of a Plex, Jellyfin
+  or Emby server.
+- **More room for the list.** A taller window now makes the batch list taller. The divider above
+  the messages can be dragged. **Pop out list** opens the list in a window of its own, to maximise
+  or move to another screen; closing it puts the list back. The window size, the divider and
+  the list's own window are remembered.
+
+### Changed
+
+- "Give each movie its own folder in the output folder" is now "Keep the folder layout in the
+  output folder". The clean copies keep the folders they were in below the added folder, as in
+  `Output\Show\Season 01\Episode.clean.mkv`. A movie without a folder of its own still gets one
+  named after it.
+- Movies added with **Add files...** start ticked; folders start with nothing ticked.
+- New defaults: "Confirm each word with a second listen", "Let me hear and decide unresolved
+  words" and "Keep the folder layout in the output folder" are now on. A choice you made yourself
+  before is kept.
+- The word list has "blowjob" and "blow job" in it. An existing `words.txt` is not changed; add
+  `blowjob*` under `[words]` and `blow job*` under `[phrases]` to have them.
+- The README explains how to add Whisper models and voice models.
+- The first-time library download is about 4.7 GB (was 4.5 GB), for the speaking libraries.
+
+### Fixed
+
+- Subtitles made for a release that starts differently are lined up again when they are up to two
+  minutes out (was 30 seconds); before, they were ignored. Saving Private Ryan's common subtitle
+  file, for example, runs 40 seconds late.
+- Subtitle lines that the line-up moves to before the start of the movie are dropped, instead of
+  showing up in the log with a nonsense time.
+
 ## 1.2.0 - 2026-10-14
 
 ### Added

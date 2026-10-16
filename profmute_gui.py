@@ -10,7 +10,7 @@ import codecs, json, os, queue, re, shutil, subprocess, sys, threading
 import tkinter as tk
 from collections import Counter
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 try:
     import winsound
@@ -47,9 +47,14 @@ UNRESOLVED_TIP = ("An unresolved word is one the subtitles have but Whisper neve
                   "On: ProfMute plays a sound and shows you each one. You can play the line, then mute the whole "
                   "line, mute only its best guess at the spot, or leave it. In a batch, this pauses the batch.\n"
                   "Off: nothing is muted. The lines are listed in the log under UNRESOLVED for you to check by ear.")
-OWN_FOLDER_TIP = ("On: inside the output folder, each movie gets a folder named after it, holding its clean copy "
-                  "and its clean subtitles:\n\n"
+OWN_FOLDER_TIP = ("On: the clean copies keep the folders they were in, below the folder you added, so a library "
+                  "stays a library:\n\n"
+                  "     TV\\Show\\Season 01\\Episode.mkv\n"
+                  "     -> Output folder\\Show\\Season 01\\Episode.clean.mkv\n\n"
+                  "A movie with no folder of its own (added with Add files, or lying loose in the added folder) "
+                  "gets one named after it:\n\n"
                   "     Output folder\\Iron Man\\Iron Man.clean.mkv\n\n"
+                  "The clean subtitles go next to each clean copy.\n"
                   "Off: every clean copy goes straight into the output folder.\n\n"
                   "Needs an output folder.")
 LOG_BESIDE_TIP = ("The log lists every spot that was muted, with its time, plus the conflicts and unresolved words.\n\n"
@@ -65,13 +70,22 @@ TIPS = {
     "out_srt": "Where the clean subtitles are saved: the same subtitles with the words on your list deleted.\n\n"
                "Fills itself in next to the clean copy, under the name media players pair with it. "
                "Only written when the movie has subtitles.",
-    "list": "The movies to clean, done one after another from the top. \"Subtitles\" shows which subtitles "
-            "each one will use, \"Status\" how it went.",
-    "add_files": "Add movies to the list. You can pick .srt files here too: each one is given to the movie "
+    "list": "The movies to clean. Only the ticked ones are done, one after another from the top.\n\n"
+            "Click a box to tick or untick it, or select rows and press Space. A folder's box ticks or unticks "
+            "everything inside it, so one click takes a whole show or season.\n\n"
+            "\"Subtitles\" shows which subtitles each movie will use, \"Status\" how it went.",
+    "add_files": "Add movies to the list, ticked. You can pick .srt files here too: each one is given to the movie "
                  "in the list that has the same name.",
-    "add_folder": "Add every movie in a folder and in all the folders inside it. Clean copies made earlier are left out.",
-    "set_subtitle": "Choose a subtitle file by hand for the movie selected in the list.",
-    "remove": "Take the selected movies off the list. Nothing is deleted from your disk.",
+    "add_folder": "Add a folder, such as your Movies or TV folder, with every movie in it and in the folders inside "
+                  "it, shown as a tree. Nothing is ticked yet: tick the movies, shows or seasons to clean.\n\n"
+                  "Subtitle files next to the movies are found by themselves. Clean copies made earlier are left out.",
+    "pop_out": "Open the list in a window of its own, which you can make as big as you like or move to another "
+               "screen. Close that window, or press Put list back, to return the list here.",
+    "dock": "Return the list to this tab.",
+    "tick_all": "Tick every movie in the list.",
+    "untick_all": "Untick every movie in the list.",
+    "set_subtitle": "Choose a subtitle file by hand for the movies selected in the list.",
+    "remove": "Take the selected movies or folders off the list. Nothing is deleted from your disk.",
     "clear": "Empty the list. Nothing is deleted from your disk.",
     "batch_out": "Where the clean copies of the batch are saved. Leave empty to put each one next to its own movie.",
     "log_dir": "The folder for logs when they are not put next to the clean copies (untick the box above).\n\n"
@@ -92,7 +106,7 @@ TIPS = {
                   "word; lower it if the end of the word before gets cut off.",
     "pad_after": "Seconds of extra silence after each muted word.\n\nRaise it if you can hear the end of a "
                  "word; lower it if the start of the next word gets cut off.",
-    "start": "Clean the movie on the One movie tab, or every movie in the Batch list, whichever tab is showing.",
+    "start": "Clean the movie on the One movie tab, or every ticked movie in the Batch list, whichever tab is showing.",
     "cancel": "Stop the run. A clean copy that was only half written is deleted. Your original movie is never touched.",
     "dark": "Switch the window between dark and light colours.",
 }
@@ -111,6 +125,15 @@ FRONT_TIP = ("Some surround mixes put a little of the dialogue in the front left
              "it hears the word there too, it changes those speakers as well for that word.\n"
              "Off: only the centre channel is changed.\n\n"
              "Only used with \"Mute only the dialogue channel\" on a surround movie. Takes a little longer.")
+SPEAK_TIP = ("On: instead of leaving a gap, a clean word is said in its place in the actor's own voice, inside "
+             "their own sentence: \"get the heck out of my bar\", \"you're a freaking joke\". An AI picks the word "
+             "to fit the sentence (your own choices in the word list's [replacements] section come first), another "
+             "AI says it, and each one is checked by listening to it again.\n"
+             "The clean subtitles say the spoken word. A word that comes out yelled (the AI copies a scream "
+             "badly) is tried again calmer; if it still yells, or does not pass the check, it stays muted as usual.\n\n"
+             "Needs an NVIDIA graphics card and \"Remove only the voice with AI\". The first time, it downloads "
+             "about 14 GB of AI models. It adds roughly 10 seconds per sentence with a swear, so 5 to 10 minutes "
+             "for a typical movie and up to about 40 minutes for one full of swearing.")
 SEPARATE_TIP = ("On: instead of silencing a word, an AI voice model takes only the voice out of those moments, "
                 "so the music and sound effects underneath keep playing. It works on stereo movies too, and on a "
                 "surround movie it works on whichever speakers are being changed.\n"
@@ -199,6 +222,62 @@ def scan_folder(folder):
     return found
 
 
+def scan_library(folder):
+    """scan_folder, plus each movie's subtitle file next to it (the one profmute.sidecar_srt would pick, or None),
+    found from the folder listing that is read anyway: one listing per folder, which counts on a network share."""
+    found = []
+    for base, dirs, names in os.walk(folder):
+        dirs.sort(key=str.lower)
+        lower = {n.lower(): n for n in names}
+        for name in sorted(names, key=str.lower):
+            p = Path(base) / name
+            if p.suffix.lower() in VIDEO_EXT and not is_our_output(p):
+                side = next((lower[s] for s in (p.stem.lower() + x for x in (".en.srt", ".eng.srt", ".srt"))
+                             if s in lower), None)
+                found.append((p, Path(base) / side if side else None))
+    return found
+
+
+def fits_screen(widget, geometry):
+    """A remembered window size and place ("WxH+X+Y") is still on the screens there are now (one may be unplugged)."""
+    m = re.fullmatch(r"(\d+)x(\d+)([+-]+\d+)([+-]+\d+)", geometry or "")
+    if not m:
+        return False
+    w, h, x, y = (int(v.replace("+", "")) for v in m.groups())
+    try:   # all monitors together
+        import ctypes
+        metric = ctypes.windll.user32.GetSystemMetrics
+        left, top, width, height = metric(76), metric(77), metric(78), metric(79)
+    except Exception:
+        left, top, width, height = 0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight()
+    return (w <= width and h <= height and left - 20 <= x and x + 100 <= left + width
+            and top - 20 <= y and y + 50 <= top + height)
+
+
+def box_images(size, border, fill, mark):
+    """The three checkbox pictures for the batch tree: unticked, ticked, partly ticked (a folder)."""
+    images = {}
+    for state in ("off", "on", "part"):
+        img = tk.PhotoImage(width=size + max(2, size // 4), height=size)   # a little room before the text
+        img.put(fill, to=(1, 1, size - 1, size - 1))
+        for box in ((0, 0, size, 1), (0, size - 1, size, size), (0, 0, 1, size), (size - 1, 0, size, size)):
+            img.put(border, to=box)
+        if state == "part":
+            inset = round(size * 0.27)
+            img.put(mark, to=(inset, inset, size - inset, size - inset))
+        elif state == "on":
+            thick = max(2, round(size / 7))
+            points = ((0.2, 0.5), (0.42, 0.72), (0.8, 0.28))
+            for (x0, y0), (x1, y1) in zip(points, points[1:]):
+                steps = size * 2
+                for i in range(steps + 1):
+                    x = round((x0 + (x1 - x0) * i / steps) * size)
+                    y = round((y0 + (y1 - y0) * i / steps) * size)
+                    img.put(mark, to=(x - thick // 2, y - thick // 2, x - thick // 2 + thick, y - thick // 2 + thick))
+        images[state] = img
+    return images
+
+
 def srt_belongs_to(srt, movie):
     """Movie.srt, Movie.en.srt, Movie.eng.sdh.srt ... all belong to Movie.mkv, whatever folder they are in."""
     name, stem = srt.name.lower(), movie.stem.lower()
@@ -254,7 +333,12 @@ class App(ttk.Frame):
         self.results = Counter()
         self.found = None        # "Found N spots" as reported by the current run
         self.writing = None      # the current output file, once the run has started writing it
-        self.batch = {}          # batch list: tree row id -> {"movie": Path, "srt": chosen subtitle file or ""}
+        self.batch = {}          # batch list, movie rows: tree row id -> {"movie": Path, "srt": chosen subtitle
+                                 # file or "", "on": ticked, "root": the added folder it came from (or None),
+                                 # "side": the subtitle file found next to it when the folder was scanned}
+        self.folders = {}        # batch list, folder rows: tree row id -> Path
+        self.scanning = 0        # folders still being scanned
+        self.popped = False      # the batch list has a window of its own
         self.ask_win = None      # the conflict pop-up, while one is open
         self.ask_info = {}       # and the question it shows
         self.model_rows = []
@@ -277,14 +361,15 @@ class App(ttk.Frame):
         self.batch_out = tk.StringVar()
         self.skip_done = tk.BooleanVar(value=True)
         self.batch_ask = tk.BooleanVar(value=bool(settings.get("batch_ask", False)))
-        self.own_folder = tk.BooleanVar(value=bool(settings.get("batch_own_folder", False)))
+        self.own_folder = tk.BooleanVar(value=bool(settings.get("batch_own_folder", True)))
         self.log_beside = tk.BooleanVar(value=bool(settings.get("log_beside", True)))
-        self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", False)))
-        self.ask_unresolved = tk.BooleanVar(value=bool(settings.get("ask_unresolved", False)))
+        self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", True)))
+        self.ask_unresolved = tk.BooleanVar(value=bool(settings.get("ask_unresolved", True)))
         self.fade = tk.BooleanVar(value=bool(settings.get("fade", True)))
         self.dialogue_only = tk.BooleanVar(value=bool(settings.get("dialogue_only", True)))
         self.front_check = tk.BooleanVar(value=bool(settings.get("front_check", True)))
         self.separate = tk.BooleanVar(value=bool(settings.get("separate", True)))
+        self.speak = tk.BooleanVar(value=bool(settings.get("speak", False)))
         self.dry = tk.BooleanVar()
         self.dark = tk.BooleanVar(value=saved_dark())
         self.pad_before = tk.StringVar(value=f"{profmute.PAD_BEFORE:.2f}")
@@ -292,7 +377,13 @@ class App(ttk.Frame):
         self.status = tk.StringVar(value="Ready.")
         self.inputs = []
 
-        self.tabs = ttk.Notebook(self)
+        # the tabs and settings above, the messages below, and a divider between them that can be dragged
+        self.split = ttk.PanedWindow(self, orient="vertical")
+        self.split.pack(fill="both", expand=True)
+        self.split.bind("<B1-Motion>", self.keep_divider, add="+")
+        self.split.bind("<ButtonRelease-1>", self.keep_divider, add="+")
+        body = self.body = ttk.Frame(self.split)
+        self.tabs = ttk.Notebook(body)
         self.tabs.grid(row=0, column=0, columnspan=3, sticky="nsew", pady=(0, 8))
         one = ttk.Frame(self.tabs, padding=10)
         many = ttk.Frame(self.tabs, padding=10)
@@ -310,32 +401,48 @@ class App(ttk.Frame):
         # --- batch
         many.columnconfigure(1, weight=1)
         many.rowconfigure(0, weight=1)
-        box = ttk.Frame(many)
-        box.grid(row=0, column=0, columnspan=3, sticky="nsew")
-        columns = (("movie", "Movie", 250), ("folder", "Folder", 210), ("subs", "Subtitles", 170), ("status", "Status", 150))
-        self.tree = ttk.Treeview(box, columns=[c[0] for c in columns], show="headings", height=6, selectmode="extended")
+        # the list and its buttons: a classic frame, because only those can become a window of their own
+        self.list_part = tk.Frame(many, highlightthickness=0)
+        self.list_part.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        buttons = ttk.Frame(self.list_part)
+        buttons.pack(side="bottom", fill="x", pady=(6, 0))
+        box = ttk.Frame(self.list_part)
+        box.pack(side="top", fill="both", expand=True)
+        columns = (("#0", "Movie", 300), ("folder", "Folder", 170), ("subs", "Subtitles", 170), ("status", "Status", 150))
+        self.tree = ttk.Treeview(box, columns=[c[0] for c in columns[1:]], show="tree headings", height=9,
+                                 selectmode="extended")
         for key, title, width in columns:
             self.tree.heading(key, text=title, anchor="w")
-            self.tree.column(key, width=width, anchor="w", stretch=key in ("movie", "folder"))
+            self.tree.column(key, width=width, anchor="w", stretch=key in ("#0", "folder"))
+        self.tree.bind("<Button-1>", self.tree_click)
+        self.tree.bind("<space>", lambda e: self.toggle(self.tree.selection()) or "break")
         tree_scroll = ttk.Scrollbar(box, command=self.tree.yview)
         tree_scroll.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.configure(yscrollcommand=tree_scroll.set)
         Tooltip(self.tree, TIPS["list"])
-        buttons = ttk.Frame(many)
-        buttons.grid(row=1, column=0, columnspan=3, sticky="w", pady=6)
         for text, command, tip in (("Add files...", self.add_files, "add_files"), ("Add folder...", self.add_folder, "add_folder"),
+                                   ("Tick all", lambda: self.tick_all(True), "tick_all"),
+                                   ("Untick all", lambda: self.tick_all(False), "untick_all"),
                                    ("Set subtitle...", self.set_subtitle, "set_subtitle"),
                                    ("Remove", self.remove_selected, "remove"), ("Clear", self.clear_batch, "clear")):
             b = ttk.Button(buttons, text=text, command=command)
             b.pack(side="left", padx=(0, 6))
             Tooltip(b, TIPS[tip])
             self.inputs.append(b)
+        self.pop_btn = ttk.Button(buttons, text="Pop out list", command=self.pop_list)
+        self.pop_btn.pack(side="right")
+        Tooltip(self.pop_btn, TIPS["pop_out"])
+        self.list_away = ttk.Frame(many)   # stands in for the list while it has a window of its own
+        ttk.Label(self.list_away, text="The list is open in a window of its own.").pack(side="left")
+        back = ttk.Button(self.list_away, text="Put it back", command=self.dock_list)
+        back.pack(side="left", padx=10)
+        Tooltip(back, TIPS["dock"])
         self.out_widgets += self.row(many, 2, "Output folder", self.batch_out, self.browse_batch_out,
                                      "Leave empty to put each clean copy next to its own movie.", tip=TIPS["batch_out"])
         options = ttk.Frame(many)
         options.grid(row=4, column=1, columnspan=2, sticky="w", padx=8, pady=(4, 0))
-        own = ttk.Checkbutton(options, text="Give each movie its own folder in the output folder", variable=self.own_folder,
+        own = ttk.Checkbutton(options, text="Keep the folder layout in the output folder", variable=self.own_folder,
                               command=lambda: save_settings(batch_own_folder=self.own_folder.get()))
         skip = ttk.Checkbutton(options, text="Skip movies that already have a clean copy", variable=self.skip_done)
         ask = ttk.Checkbutton(options, text="Pause and ask me about conflicts",
@@ -348,18 +455,18 @@ class App(ttk.Frame):
         self.inputs += [own, skip, ask]
 
         # --- shared by both tabs
-        beside = ttk.Checkbutton(self, text="Put the log next to the clean copy", variable=self.log_beside,
+        beside = ttk.Checkbutton(body, text="Put the log next to the clean copy", variable=self.log_beside,
                                  command=self.log_beside_changed)
         beside.grid(row=1, column=1, columnspan=2, sticky="w", padx=8, pady=(0, 2))
         Tooltip(beside, LOG_BESIDE_TIP)
         self.inputs.append(beside)
-        self.log_widgets = self.row(self, 2, "Log folder", self.log_dir, self.browse_log_dir, tip=TIPS["log_dir"])
+        self.log_widgets = self.row(body, 2, "Log folder", self.log_dir, self.browse_log_dir, tip=TIPS["log_dir"])
 
-        words_label = ttk.Label(self, text="Word list")
+        words_label = ttk.Label(body, text="Word list")
         words_label.grid(row=3, column=0, sticky="w", pady=4)
-        words_entry = ttk.Entry(self, textvariable=self.words)
+        words_entry = ttk.Entry(body, textvariable=self.words)
         words_entry.grid(row=3, column=1, sticky="ew", padx=8)
-        words_buttons = ttk.Frame(self)
+        words_buttons = ttk.Frame(body)
         words_buttons.grid(row=3, column=2, sticky="ew")
         words_browse = ttk.Button(words_buttons, text="Browse...", command=self.browse_words)
         words_browse.pack(side="left")
@@ -370,9 +477,9 @@ class App(ttk.Frame):
         Tooltip(words_edit, TIPS["words_edit"])
         self.inputs += [words_entry, words_browse, words_edit]
 
-        model_label = ttk.Label(self, text="Whisper model")
+        model_label = ttk.Label(body, text="Whisper model")
         model_label.grid(row=4, column=0, sticky="w", pady=4)
-        self.model_box = ttk.Combobox(self, state="readonly")
+        self.model_box = ttk.Combobox(body, state="readonly")
         self.model_box.bind("<<ComboboxSelected>>", self.model_changed)
         self.model_box.grid(row=4, column=1, columnspan=2, sticky="ew", padx=(8, 0))
         for w in (model_label, self.model_box):
@@ -382,9 +489,9 @@ class App(ttk.Frame):
         self.show_models([{"name": name, "note": note, **cached.get(name, {})} for name, note in profmute.load_models()],
                          settings.get("model"))
 
-        voice_label = ttk.Label(self, text="Voice model")
+        voice_label = ttk.Label(body, text="Voice model")
         voice_label.grid(row=5, column=0, sticky="w", pady=4)
-        self.voice_box = ttk.Combobox(self, state="readonly")
+        self.voice_box = ttk.Combobox(body, state="readonly")
         self.voice_box.bind("<<ComboboxSelected>>", self.voice_changed)
         self.voice_box.grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 0))
         for w in (voice_label, self.voice_box):
@@ -397,10 +504,10 @@ class App(ttk.Frame):
         if not self.separate.get():
             self.voice_box.configure(state="disabled")
 
-        pad_label = ttk.Label(self, text="Padding (seconds)")
+        pad_label = ttk.Label(body, text="Padding (seconds)")
         pad_label.grid(row=6, column=0, sticky="w", pady=4)
         Tooltip(pad_label, TIPS["padding"])
-        pads = ttk.Frame(self)
+        pads = ttk.Frame(body)
         pads.grid(row=6, column=1, columnspan=2, sticky="w", padx=8)
         for text, var, tip in (("before the word", self.pad_before, "pad_before"), ("after the word", self.pad_after, "pad_after")):
             spin = ttk.Spinbox(pads, textvariable=var, from_=0.0, to=2.0, increment=0.05, width=6, format="%.2f")
@@ -412,7 +519,7 @@ class App(ttk.Frame):
             self.inputs.append(spin)
 
         # the options, in two columns: how the words are found (left), how they are muted (right)
-        boxes = ttk.Frame(self)
+        boxes = ttk.Frame(body)
         boxes.grid(row=7, column=1, columnspan=2, sticky="w", padx=8, pady=(6, 0))
         remember = lambda key, var: (lambda: save_settings(**{key: var.get()}))
         options = [
@@ -426,14 +533,19 @@ class App(ttk.Frame):
             (2, 1, "Check the front left/right speakers too", self.front_check,
              remember("front_check", self.front_check), FRONT_TIP),
             (3, 1, "Remove only the voice with AI (keeps music)", self.separate, self.separate_changed, SEPARATE_TIP),
+            (4, 1, "Speak a clean word in the actor's voice (AI)", self.speak, remember("speak", self.speak), SPEAK_TIP),
         ]
         for r, c, text, var, command, tip in options:
             box = ttk.Checkbutton(boxes, text=text, variable=var, command=command)
             box.grid(row=r, column=c, sticky="w", padx=(0, 36), pady=(0 if r == 0 else 4, 0))
+            if var is self.speak:
+                self.speak_box = box
+                if not self.separate.get():   # speaking needs the voice removal
+                    box.configure(state="disabled")
             Tooltip(box, tip)
             self.inputs.append(box)
 
-        bar = ttk.Frame(self)
+        bar = ttk.Frame(body)
         bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(12, 6))
         self.start_btn = ttk.Button(bar, text="Start", command=self.start)
         self.start_btn.pack(side="left")
@@ -445,16 +557,17 @@ class App(ttk.Frame):
         for w, tip in ((self.start_btn, "start"), (self.cancel_btn, "cancel"), (self.dark_box, "dark")):
             Tooltip(w, TIPS[tip])
 
-        pane = ttk.Frame(self)
-        pane.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        pane = ttk.Frame(self.split, padding=(0, 6, 0, 0))
         self.text = tk.Text(pane, height=10, wrap="word", state="disabled", font=("Consolas", 10))
         scroll = ttk.Scrollbar(pane, command=self.text.yview)
         scroll.pack(side="right", fill="y")
         self.text.pack(side="left", fill="both", expand=True)
         self.text.configure(yscrollcommand=scroll.set)
 
-        self.columnconfigure(1, weight=1)
-        self.rowconfigure(9, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)          # a taller window makes the batch list taller
+        self.split.add(body, weight=3)
+        self.split.add(pane, weight=1)
         self.show_log_box()
         self.movie.trace_add("write", self.movie_changed)
         self.out.trace_add("write", self.out_changed)
@@ -546,6 +659,17 @@ class App(ttk.Frame):
             drop = dict(background="SystemWindow", foreground="SystemWindowText",
                         selectbackground="SystemHighlight", selectforeground="SystemHighlightText")
         s.configure("Big.TLabel", font=("Segoe UI", 12, "bold"))
+        # the batch list's checkboxes are pictures, drawn in this theme's colors and sized for the screen
+        size = round(13 * self.root.winfo_fpixels("1i") / 96)
+        s.configure("Treeview", rowheight=max(size + 8, font.nametofont("TkDefaultFont").metrics("linespace") + 6))
+        self.boxes = box_images(size, *((c["muted"], c["field"], c["accent"]) if self.dark.get()
+                                        else ("#767676", "#ffffff", "#0067c0")))
+        self.show_boxes()
+        for iid in self.batch:
+            self.show_row(iid)
+        self.list_part.configure(background=c["bg"] if self.dark.get() else self.light_bg)
+        if self.popped:
+            self.title_bar(self.list_part)
         # the model list that drops down is a plain listbox the themes do not reach
         for box in (self.model_box, self.voice_box):
             popdown = self.tk.call("ttk::combobox::PopdownWindow", box)
@@ -610,6 +734,7 @@ class App(ttk.Frame):
     def separate_changed(self):
         save_settings(separate=self.separate.get())
         self.voice_box.configure(state="readonly" if self.separate.get() and not self.proc else "disabled")
+        self.speak_box.configure(state="normal" if self.separate.get() and not self.proc else "disabled")
 
     def browse_words(self):
         p = filedialog.askopenfilename(title="Choose the word list", filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -703,20 +828,96 @@ class App(ttk.Frame):
         self.batch_add([Path(os.path.normpath(p)) for p in picked])
 
     def add_folder(self):
-        folder = filedialog.askdirectory(title="Add every movie in a folder and its subfolders")
-        if folder:
-            movies = scan_folder(os.path.normpath(folder))
-            if not movies:
-                return messagebox.showinfo("ProfMute", f"No movies found in:\n{os.path.normpath(folder)}")
-            self.batch_add(movies)
+        folder = filedialog.askdirectory(title="Add a folder of movies or shows, such as your Movies or TV folder",
+                                         initialdir=load_settings().get("batch_folder") or None)
+        if not folder:
+            return
+        folder = Path(os.path.normpath(folder))
+        save_settings(batch_folder=str(folder.parent))
+        self.scanning += 1
+        self.status.set(f"Looking for movies in {folder} ...")
+        self.root.configure(cursor="watch")
+        # a big library on a network share takes a while to list: not in the window's own thread
+        threading.Thread(target=lambda: self.q.put(("scanned", folder, scan_library(folder))), daemon=True).start()
+
+    def scanned(self, folder, found):
+        """A folder has been scanned: add it as a tree of its folders and movies, nothing ticked yet."""
+        self.scanning -= 1
+        if not self.scanning:
+            self.root.configure(cursor="")
+        known = {os.path.normcase(str(d["movie"])) for d in self.batch.values()}
+        found = [(p, side) for p, side in found if os.path.normcase(str(p)) not in known]
+        if not found:
+            self.status.set("Ready.")
+            return messagebox.showinfo("ProfMute", f"No movies found in:\n{folder}" + (
+                "\n\nMovies that are in the list already are not added again." if known else ""))
+        top = self.tree.insert("", "end", text=folder.name or str(folder), open=True, values=(str(folder), "", ""))
+        self.folders[top] = folder
+        rows = {Path("."): top}   # folder below the added one -> its row
+        for p, side in found:
+            iid = self.tree.insert(self.folder_row(rows, folder, p.parent.relative_to(folder)), "end")
+            self.batch[iid] = {"movie": p, "srt": "", "on": False, "root": folder, "side": side}
+            self.show_row(iid)
+        self.show_boxes()
+        self.status.set(f"Added {len(found)} movie(s) from {folder}. Tick the ones to clean.")
+
+    def folder_row(self, rows, root, rel):
+        if rel not in rows:
+            rows[rel] = iid = self.tree.insert(self.folder_row(rows, root, rel.parent), "end", text=rel.name,
+                                               values=("", "", ""))
+            self.folders[iid] = root / rel
+        return rows[rel]
+
+    # ticking
+
+    def files_under(self, iid=""):
+        """The movie rows at or below a row ("" = the whole list), in list order."""
+        if iid in self.batch:
+            return [iid]
+        return [f for child in self.tree.get_children(iid) for f in self.files_under(child)]
+
+    def tree_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid and self.tree.identify_element(event.x, event.y) == "image":   # the checkbox
+            self.toggle([iid])
+            return "break"   # a click on the box ticks; it does not change the selection
+
+    def toggle(self, rows):
+        """Tick the rows, or untick them if everything in them is ticked already."""
+        files = [f for iid in rows for f in self.files_under(iid)]
+        if files:
+            self.tick(files, not all(self.batch[f]["on"] for f in files))
+
+    def tick_all(self, on):
+        self.tick(self.files_under(), on)
+
+    def tick(self, files, on):
+        if self.job:   # the batch running now was made from the ticks at Start
+            return
+        for f in files:
+            self.batch[f]["on"] = on
+        self.show_boxes()
+
+    def show_boxes(self, iid=""):
+        """Draw the checkboxes at and below a row. A folder's box shows whether all, some or none of the movies
+        in it are ticked. -> that row's state"""
+        if iid in self.batch:
+            state = "on" if self.batch[iid]["on"] else "off"
+        else:
+            states = {self.show_boxes(child) for child in self.tree.get_children(iid)}
+            state = states.pop() if len(states) == 1 else "part" if states else "off"
+        if iid:
+            self.tree.item(iid, image=self.boxes[state])
+        return state
 
     def batch_add(self, paths):
-        """Add movies to the list; a subtitle file is attached to the movie in the list with the same name."""
+        """Add movies to the list, ticked; a subtitle file is attached to the movie in the list with the same name."""
         known = {os.path.normcase(str(d["movie"])) for d in self.batch.values()}
         for p in paths:
             if p.suffix.lower() in VIDEO_EXT and os.path.normcase(str(p)) not in known:
                 known.add(os.path.normcase(str(p)))
-                self.batch[self.tree.insert("", "end")] = {"movie": p, "srt": ""}
+                self.batch[self.tree.insert("", "end")] = {"movie": p, "srt": "", "on": True, "root": None,
+                                                          "side": profmute.sidecar_srt(p)}
         orphans = []
         for p in paths:
             if p.suffix.lower() != ".srt":
@@ -736,16 +937,17 @@ class App(ttk.Frame):
 
     def show_row(self, iid, status=None):
         d = self.batch[iid]
-        side = profmute.sidecar_srt(d["movie"])
-        subs = Path(d["srt"]).name if d["srt"] else side.name if side else "inside the movie, if any"
+        subs = Path(d["srt"]).name if d["srt"] else d["side"].name if d["side"] else "inside the movie, if any"
         if status is None:
             status = self.tree.set(iid, "status")
-        self.tree.item(iid, values=(d["movie"].name, str(d["movie"].parent), subs, status))
+        folder = "" if self.tree.parent(iid) else str(d["movie"].parent)   # inside a folder row it says so already
+        self.tree.item(iid, text=d["movie"].name, image=self.boxes["on" if d["on"] else "off"],
+                       values=(folder, subs, status))
 
     def set_subtitle(self):
-        rows = self.tree.selection()
+        rows = [iid for iid in self.tree.selection() if iid in self.batch]
         if not rows:
-            return messagebox.showinfo("ProfMute", "Select a movie in the list first.")
+            return messagebox.showinfo("ProfMute", "Select a movie in the list first (not a folder).")
         p = filedialog.askopenfilename(title="Choose the subtitle file for the selected movie", filetypes=SUBS,
                                        initialdir=str(self.batch[rows[0]]["movie"].parent))
         if p:
@@ -754,13 +956,59 @@ class App(ttk.Frame):
                 self.show_row(iid)
 
     def remove_selected(self):
-        for iid in self.tree.selection():
-            self.tree.delete(iid)
-            del self.batch[iid]
+        self.tree.delete(*self.tree.selection())   # a folder goes with everything in it
+        self.batch = {iid: d for iid, d in self.batch.items() if self.tree.exists(iid)}
+        self.folders = {iid: p for iid, p in self.folders.items() if self.tree.exists(iid)}
+        self.show_boxes()
 
     def clear_batch(self):
         self.tree.delete(*self.tree.get_children())
         self.batch.clear()
+        self.folders.clear()
+
+    # room for the list
+
+    def keep_divider(self, _event=None):
+        """The divider can be dragged, but not so high that it hides settings, nor so low that no messages show."""
+        top, low = self.split.sashpos(0), self.body.winfo_reqheight()
+        want = min(max(top, low), max(low, self.split.winfo_height() - 80))
+        if want != top:
+            self.split.sashpos(0, want)
+
+    def pop_list(self):
+        """Give the list and its buttons a window of their own."""
+        part = self.list_part
+        part.grid_forget()
+        self.root.wm_manage(part)
+        part.configure(padx=10, pady=10)
+        wm = lambda *args: self.tk.call("wm", *args[:1], part, *args[1:])
+        wm("title", "ProfMute - batch list")
+        wm("protocol", "WM_DELETE_WINDOW", self.register(self.dock_list))
+        wm("minsize", 600, 300)
+        if ICON.is_file():
+            wm("iconbitmap", str(ICON))
+        saved = load_settings().get("list_geometry")
+        if not (saved and fits_screen(self.root, saved)):
+            r = self.root
+            saved = f"{r.winfo_width()}x{int(r.winfo_screenheight() * 0.75)}+{r.winfo_x() + 40}+{max(0, r.winfo_y())}"
+        wm("geometry", saved)
+        self.list_away.grid(row=0, column=0, columnspan=3, sticky="nw", pady=(20, 0))
+        self.pop_btn.configure(text="Put list back", command=self.dock_list)
+        self.title_bar(part)
+        self.popped = True
+
+    def dock_list(self):
+        """Back into the Batch tab."""
+        if not self.popped:
+            return
+        part = self.list_part
+        save_settings(list_geometry=self.tk.call("wm", "geometry", part))
+        self.root.wm_forget(part)
+        part.configure(padx=0, pady=0)
+        self.list_away.grid_forget()
+        part.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        self.pop_btn.configure(text="Pop out list", command=self.pop_list)
+        self.popped = False
 
     def browse_batch_out(self):
         p = filedialog.askdirectory(title="Choose the folder for the clean copies", initialdir=self.path(self.batch_out) or str(HERE))
@@ -816,7 +1064,8 @@ class App(ttk.Frame):
                (["--unresolved", "ask"] if self.ask_unresolved.get() else []) + (["--dry"] if self.dry.get() else []) + \
                ([] if self.fade.get() else ["--no-fade"]) + ([] if self.dialogue_only.get() else ["--all-channels"]) + \
                ([] if self.front_check.get() else ["--no-front-check"]) + \
-               (["--voice-model", self.voice_model()] if self.separate.get() and self.voice_model() else ["--no-separate"])
+               (["--voice-model", self.voice_model()] if self.separate.get() and self.voice_model() else ["--no-separate"]) + \
+               (["--speak"] if self.speak.get() and self.separate.get() else [])
 
     def command(self, movie):
         return [self.python(), "-u", str(SCRIPT), str(movie)]
@@ -868,14 +1117,19 @@ class App(ttk.Frame):
         self.run_jobs([{"cmd": cmd, "out": out, "title": os.path.basename(movie)}])
 
     def start_batch(self):
-        rows = self.tree.get_children()
-        if not rows:
+        if self.scanning:
+            return messagebox.showinfo("ProfMute", "A folder is still being searched for movies. Start again when it "
+                                       "is in the list.")
+        if not self.batch:
             return messagebox.showerror("ProfMute", "Add at least one movie to the list first.")
+        rows = [iid for iid in self.files_under() if self.batch[iid]["on"]]
+        if not rows:
+            return messagebox.showerror("ProfMute", "Tick at least one movie in the list first.")
         dry, out_dir = self.dry.get(), self.path(self.batch_out)
         own_folder, log_beside = self.own_folder.get(), self.log_beside.get()
         if own_folder and not out_dir:
-            return messagebox.showerror("ProfMute", "Choose an output folder first.\n\n\"Give each movie its own folder\" "
-                                        "makes those folders inside the output folder.")
+            return messagebox.showerror("ProfMute", "Choose an output folder first.\n\n\"Keep the folder layout\" "
+                                        "makes the folders inside the output folder.")
         shared = self.shared_args(log_box=not log_beside)
         if not shared:
             return
@@ -885,7 +1139,9 @@ class App(ttk.Frame):
             d = self.batch[iid]
             movie = d["movie"]
             folder = Path(out_dir) if out_dir else movie.parent
-            if own_folder:   # Output\Iron Man\Iron Man.clean.mkv (a folder name cannot end in a dot or a space)
+            if own_folder and d["root"] and movie.parent != d["root"]:   # TV\Show\Season 01\x -> Output\Show\Season 01\x
+                folder = folder / movie.parent.relative_to(d["root"])
+            elif own_folder:   # Output\Iron Man\Iron Man.clean.mkv (a folder name cannot end in a dot or a space)
                 folder = folder / (movie.stem.rstrip(". ") or movie.stem)
             out = folder / (movie.stem + ".clean.mkv")
             if not movie.is_file():
@@ -907,8 +1163,10 @@ class App(ttk.Frame):
             if len(set(outs)) < len(outs):
                 for j in jobs:
                     self.show_row(j["iid"], "")
-                return messagebox.showerror("ProfMute", "Two movies in the list have the same file name, so they would "
-                                            "write the same clean copy.\nLeave the output folder empty or remove one.")
+                same = next(j["out"] for j in jobs if outs.count(os.path.normcase(j["out"])) > 1)
+                return messagebox.showerror("ProfMute", "Two ticked movies have the same file name, so they would "
+                                            f"write the same clean copy:\n{same}\n\nLeave the output folder empty, "
+                                            "tick \"Keep the folder layout\", or untick one of them.")
             existing = [j["out"] for j in jobs if os.path.exists(j["out"])]
             if existing and not messagebox.askyesno("ProfMute", f"{len(existing)} clean copies already exist and will "
                                                     "be replaced:\n" + "\n".join(existing[:8]) +
@@ -969,6 +1227,8 @@ class App(ttk.Frame):
                     self.show_voice_models(item[1])
                     save_settings(voice_models={r["name"]: {"size": r.get("size"), "downloaded": r.get("downloaded")}
                                                 for r in item[1]})
+                elif item[0] == "scanned":
+                    self.scanned(item[1], item[2])
                 elif item[0] == "ffmpeg":
                     self.start_btn.configure(state="normal")
                     self.status.set("ffmpeg is installed. Press Start again." if item[1] else "ffmpeg was not installed.")
@@ -1170,6 +1430,7 @@ class App(ttk.Frame):
             w.configure(state="disabled" if running else "readonly" if w in (self.model_box, self.voice_box) else "normal")
         if not running and not self.separate.get():
             self.voice_box.configure(state="disabled")
+            self.speak_box.configure(state="disabled")
         if not running:
             self.dry_changed()
             self.show_log_box()
@@ -1195,7 +1456,29 @@ class App(ttk.Frame):
             if self.writing and os.path.exists(self.writing):
                 os.remove(self.writing)
         self.close_ask()
+        self.remember_layout()
         self.root.destroy()
+
+    def remember_layout(self):
+        """The window's size and place, the divider and the list's own window, for the next start."""
+        zoomed = self.root.state() == "zoomed"
+        layout = dict(zoomed=zoomed, divider=self.split.sashpos(0))
+        if self.root.state() == "normal":
+            layout["window"] = self.root.geometry()
+        if self.popped:
+            layout["list_geometry"] = self.tk.call("wm", "geometry", self.list_part)
+        save_settings(**layout)
+
+    def restore_layout(self):
+        s = load_settings()
+        if fits_screen(self.root, s.get("window")):
+            self.root.geometry(s["window"])
+        if s.get("zoomed"):
+            self.root.state("zoomed")
+        if isinstance(s.get("divider"), int):
+            self.root.update()   # the window at its full size first, or the divider is fitted into a smaller one
+            self.split.sashpos(0, s["divider"])
+            self.keep_divider()
 
 
 def main():
@@ -1210,7 +1493,9 @@ def main():
     root.minsize(860, 900)
     if ICON.is_file():
         root.iconbitmap(default=str(ICON))
-    App(root).pack(fill="both", expand=True)
+    app = App(root)
+    app.pack(fill="both", expand=True)
+    app.restore_layout()
     root.mainloop()
 
 

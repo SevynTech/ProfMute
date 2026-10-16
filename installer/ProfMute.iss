@@ -55,7 +55,7 @@ Name: "{autodesktop}\ProfMute"; Filename: "{app}\ProfMute.exe"; WorkingDir: "{ap
 Type: files; Name: "{app}\.venv\profmute-ready"
 
 [Run]
-Filename: "{app}\ProfMute.exe"; Parameters: "--setup"; StatusMsg: "Downloading Python and the speech recognition and voice removal libraries, about 4.5 GB..."; Flags: waituntilterminated; BeforeInstall: Downloading(True); AfterInstall: Downloading(False)
+Filename: "{app}\ProfMute.exe"; Parameters: "--setup"; StatusMsg: "Downloading Python and the speech recognition and voice removal libraries, about 4.7 GB..."; Flags: waituntilterminated; BeforeInstall: Downloading(True); AfterInstall: Downloading(False)
 Filename: "{app}\ProfMute.exe"; Description: "Open ProfMute now"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -73,6 +73,10 @@ end;
 Type: filesandordirs; Name: "{app}\.venv"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\voice-models"
+Type: filesandordirs; Name: "{app}\speak-models"
+Type: filesandordirs; Name: "{app}\speak_stubs\tn\__pycache__"
+Type: filesandordirs; Name: "{app}\speak_stubs\tn\chinese\__pycache__"
+Type: filesandordirs; Name: "{app}\speak_stubs\tn\english\__pycache__"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\voice_separation\__pycache__"
 Type: filesandordirs; Name: "{app}\launcher\__pycache__"

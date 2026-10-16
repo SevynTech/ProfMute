@@ -19,7 +19,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("ProfMute")]
 [assembly: AssemblyProduct("ProfMute")]
 [assembly: AssemblyDescription("Mutes profanity in a movie's audio track")]
-[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyVersion("1.3.0.0")]
 
 static class Launcher
 {
@@ -80,7 +80,7 @@ static class Launcher
         if (ask && MessageBox.Show("Welcome to ProfMute.\n\n" +
                             "Before its first run, ProfMute has to download Python and the speech recognition and voice removal libraries " +
                             "into its own folder:\n\n" + dir + "\n\n" +
-                            "That is about 4.5 GB and needs an internet connection. It takes several minutes and only happens once.\n\n" +
+                            "That is about 4.7 GB and needs an internet connection. It takes several minutes and only happens once.\n\n" +
                             "Download now?",
                             Title + " - first-time setup", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
             return false;
@@ -89,7 +89,7 @@ static class Launcher
         // wrong so the reason can be read. Under the installer: no window and no waiting for a key;
         // what uv said goes to setup-log.txt instead.
         var setup = new ProcessStartInfo("cmd.exe", ask
-            ? "/s /c \"title ProfMute setup & echo Downloading Python and the speech recognition and voice removal libraries, about 4.5 GB. " +
+            ? "/s /c \"title ProfMute setup & echo Downloading Python and the speech recognition and voice removal libraries, about 4.7 GB. " +
               "This window closes by itself when it is done. & echo. & \"" + uv + "\" sync --frozen || " +
               "(echo. & echo Setup did not finish. Check your internet connection, then start ProfMute again. & pause & exit /b 1)\""
             : "/s /c \"\"" + uv + "\" sync --frozen > setup-log.txt 2>&1\"");

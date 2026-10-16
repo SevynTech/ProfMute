@@ -17,9 +17,10 @@ Everything runs on your own PC. Nothing about your movies is sent anywhere.
 ## What you need
 
 - Windows 10 or 11, 64-bit.
-- About 16 GB of free disk space: 7 GB of libraries, 3.1 GB for the default speech model, 0.9 GB
+- About 16 GB of free disk space: 7.5 GB of libraries, 3.1 GB for the default speech model, 0.9 GB
   for the voice removal model, and room for the sound track while it is being cleaned (up to 5 GB
-  for a long surround movie, removed afterwards).
+  for a long surround movie, removed afterwards). **Speak a clean word** (off by default) needs
+  about 14 GB more for its models, downloaded the first time you use it.
 - An internet connection for the first run.
 - **A graphics card from NVIDIA is strongly recommended.** With one, a two-hour movie takes
   roughly 10 to 15 minutes. Without one ProfMute still works, on the processor, but the default
@@ -33,12 +34,12 @@ Both downloads are on the [latest release](https://github.com/SevynTech/ProfMute
 
 **With the installer (easiest).** Download the `ProfMute-Setup` exe and run it. It installs for
 your Windows account only, so it needs no administrator rights. Its last step downloads Python and
-the speech recognition and voice removal libraries (about 4.5 GB), which takes a few minutes.
+the speech recognition and voice removal libraries (about 4.7 GB), which takes a few minutes.
 ProfMute is then in the Start menu. To remove it, use Windows Settings > Apps > Installed apps.
 
 **From the zip (nothing is installed).** Download the `ProfMute` zip, unzip the `ProfMute`
 folder somewhere you can write to, such as `Documents` (not `Program Files`), and double-click
-`ProfMute.exe`. The first time, it asks to download the same 4.5 GB into that folder. To remove
+`ProfMute.exe`. The first time, it asks to download the same 4.7 GB into that folder. To remove
 it, delete the folder.
 
 Windows may show "Windows protected your PC" because neither file is signed. Choose **More info**,
@@ -62,17 +63,37 @@ The first run with a model downloads it, which takes a while.
 
 ### Batch
 
-On the **Batch** tab, add movies with **Add files...** or a whole folder tree with
-**Add folder...**. Subtitle files next to a movie are picked up by name; a subtitle file from
-another folder is matched to the movie with the same name, or assign one with **Set subtitle...**.
-Each clean copy goes next to its own movie unless you choose an output folder.
+On the **Batch** tab, **Add folder...** shows a folder, such as your Movies or TV folder (a network
+share works too), as a tree of its folders and movies. Nothing is ticked yet: tick the movies,
+shows, seasons or episodes to clean. Ticking a folder ticks everything in it; a folder where only
+some of it is ticked shows a partly filled box. **Tick all** and **Untick all** do the whole list,
+and Space toggles the selected rows.
 
-With an output folder, "Give each movie its own folder" builds a library layout inside it: a
-folder named after each movie, holding its clean copy and clean subtitles, as in
-`Output\Iron Man\Iron Man.clean.mkv`.
+For a big library, give the list more room: make the window bigger, drag the divider above the
+messages down, or press **Pop out list** to open the list in a window of its own that you can
+maximise or move to another screen (close it to put the list back). ProfMute remembers these sizes.
 
-Movies run one after another. One failing does not stop the rest, and movies that already have a
-clean copy are skipped, so an interrupted batch can simply be started again.
+**Add files...** adds single movies, already ticked. Subtitle files next to a movie are picked up
+by name; a subtitle file from another folder is matched to the movie with the same name, or assign
+one with **Set subtitle...**. Each clean copy goes next to its own movie unless you choose an
+output folder.
+
+With an output folder, "Keep the folder layout in the output folder" (on by default) recreates
+the folders below the one you added, so a library stays a library:
+
+```
+TV\Show\Season 01\Episode.mkv         ->  Output\Show\Season 01\Episode.clean.mkv
+Movies\Iron Man (2008)\Iron Man.mkv   ->  Output\Iron Man (2008)\Iron Man.clean.mkv
+```
+
+A movie without a folder of its own (added with **Add files...**, or lying loose in the added
+folder) gets one named after it, as in `Output\Iron Man\Iron Man.clean.mkv`.
+
+Only ticked movies run, one after another. One failing does not stop the rest, and movies that
+already have a clean copy are skipped, so an interrupted batch can simply be started again.
+
+If you use Plex, Jellyfin or Emby, point the output folder at a library folder and the clean copies
+show up after its next scan.
 
 ### Options
 
@@ -82,11 +103,16 @@ clean copy are skipped, so an interrupted batch can simply be started again.
 - **Whisper model**: bigger is more accurate and slower. See [Models](#models).
 - **Padding**: extra silence before and after each word. If you can hear the end of a word, raise
   "after the word".
-- **Confirm each word with a second listen**: see below.
+- **Confirm each word with a second listen**: on by default. See
+  [How sure is it?](#how-sure-is-it).
+- **Let me hear and decide unresolved words**: on by default. See
+  [How sure is it?](#how-sure-is-it).
 - **Preview only**: writes only the log, so you can see what would be muted.
 - **Fade in and out at each mute**, **Mute only the dialogue channel**, **Check the front
   left/right speakers too**, **Remove only the voice with AI** and **Voice model**: see
   [How a muted word sounds](#how-a-muted-word-sounds).
+- **Speak a clean word in the actor's voice (AI)**: off by default. See
+  [Speaking a clean word](#speaking-a-clean-word).
 
 ## How a muted word sounds
 
@@ -118,6 +144,46 @@ the first time it is used:
 
 If the voice removal cannot run (no model, no internet on first use), the word is silenced
 instead and the log says why.
+
+## Speaking a clean word
+
+> **Experimental.** It works well on calm, normal speech, but it struggles with shouting and
+> screaming, and some spots sound off: an odd pause, or a word that doesn't quite sit in the
+> line. It is also slow on swear-heavy movies. For the most natural result, leave it off: the
+> word is then simply removed and the music and effects keep playing.
+
+With **Speak a clean word in the actor's voice (AI)** ticked, a swear in normal speech is not left
+as a gap: the actor says a clean word in its place, in their own voice, inside their own sentence.
+"Now get the fuck out of my bar" becomes "Now get the **heck** out of my bar", and "You're a fucking
+joke" becomes "You're a **freaking** joke". It works on surround and stereo movies.
+
+How it works, for each sentence with a swear:
+
+1. **Choosing the word.** Gemma, an AI language model, reads the sentence and picks a plain, mild
+   word that fits it: "heck" in "where the heck", "screw" in "screw you", "freaking" before a word,
+   "jerk" for an insult. It never picks made-up sound-alikes like "fudge". Words you set yourself in
+   the word list's `[replacements]` section (see [Word list](#word-list)) always come first.
+2. **Saying it.** The voice is separated from the music, and dots.tts, an AI speech model, says the
+   sentence again with the clean word, copying the actor's voice and delivery. Only the swear is cut
+   out and replaced; the words around it stay the actor's own.
+3. **Checking it.** Whisper listens to the new sentence. If the clean word is not clearly there, or
+   anything else is off, it is tried again with different settings, up to three times.
+4. **Fitting it in.** The new word is placed exactly where the swear was, at the quiet moments around
+   it, over the music and effects.
+
+Screams are the weak spot: the speaking AI copies the delivery of the line, and it yells badly.
+So each new word is also measured: if it came out yelled (a very high pitch, or a loud word with
+no pitch at all), it is tried again with calmer instructions, and if it still yells, that spot is
+muted instead. Some swears stay muted as before, and the log's `SPOKEN` part says which and why:
+a word that came out yelled (with what was measured), anything that did not pass the check after
+three tries, and swears too close to another muted word. The yell check is tuned on male voices;
+an excited line from a high voice (a woman or a child) may now and then be muted that way.
+
+The clean subtitles say the spoken word too ("Heck no."), wherever the subtitle line has that swear.
+
+It needs an NVIDIA graphics card. The first time, it downloads about 14 GB of models (see
+[Models ProfMute uses](#models-profmute-uses)). It adds about 10 seconds for each sentence with a
+swear: 5 to 10 minutes for a typical movie, up to about 40 minutes for one full of swearing.
 
 ## How sure is it?
 
@@ -171,18 +237,45 @@ son of a bitch*     several words, muted from the first to the last
 [censored]    advanced: patterns for bleeped spellings such as f*** and s**t
 
 [cut-off]     word beginnings that subtitles cut off, like "Oh, sh..."
+
+[replacements]
+motherfucker* = son of a gun     your own clean word, for "Speak a clean word"
 ```
 
 Capital letters do not matter, and lines starting with `#` are notes. If a line cannot be
 understood, ProfMute says which line and does not start.
 
+`[replacements]` is only used with [Speaking a clean word](#speaking-a-clean-word). Each line is
+`swear = clean word`, with `*` working as in `[words]`. A swear listed there always gets your word;
+every other swear gets the AI's choice. A clean word that is itself on the list is refused.
+
 You can keep several lists and choose one with the **Word list** box. If `words.txt` is deleted, a
 fresh copy with the default words is created the next time ProfMute opens.
 
+## Models ProfMute uses
+
+All of them run on your own PC; nothing is sent anywhere. Each downloads itself the first time it is
+needed.
+
+| Model | What it does | Download | Licence | Downloaded |
+|---|---|---|---|---|
+| Whisper large-v3 (faster-whisper) | listens to the movie and finds the swears | 3.1 GB | MIT | first run |
+| Kim MelBand RoFormer | takes the voice out of a muted moment, keeping music and effects | 0.9 GB | MIT | first run with voice removal |
+| viperx BS RoFormer | second choice for voice removal | 0.6 GB | none stated | only if you choose it |
+| Gemma 4 12B | reads the sentence and chooses the clean word | 7.0 GB | Apache 2.0 | first "Speak a clean word" run |
+| dots.tts.edit | says the clean word in the actor's voice, inside their sentence | 5.2 GB | Apache 2.0 | first "Speak a clean word" run |
+| wav2vec2 large 960h | finds exactly where each word starts and ends, for a clean cut | 1.2 GB | MIT | first "Speak a clean word" run |
+| llama.cpp (an engine, not a model) | runs Gemma on the graphics card | 0.6 GB | MIT | first "Speak a clean word" run |
+
+The Whisper models are in `%USERPROFILE%\.cache\huggingface`, the voice models in the
+`voice-models` folder and the "Speak a clean word" models in the `speak-models` folder, both next to
+`ProfMute.exe`.
+
 ## Models
 
-`models.txt`, next to `ProfMute.exe`, lists the models offered in the window, one per line as
-`name | note`. The window shows each model's download size and whether you already have it.
+`models.txt`, next to `ProfMute.exe`, lists the speech recognition (Whisper) models offered in
+the window, one per line as `name | note`. The window shows each model's download size and whether
+you already have it.
 
 | Model | Download | |
 |---|---|---|
@@ -191,15 +284,49 @@ fresh copy with the default words is created the next time ProfMute opens.
 | `small.en` | 0.5 GB | fast, misses more words |
 | `tiny.en` | 80 MB | fastest, least accurate |
 
-A name can also be a Hugging Face repository (`someone/some-model`) holding a model converted for
-faster-whisper, or a folder on your PC containing one. ProfMute works in English only.
+ProfMute works in English only.
+
+### Adding a Whisper model
+
+1. Close ProfMute and open `models.txt` in a text editor such as Notepad.
+2. Add a line `name | note`. The name can be:
+   - a model name faster-whisper knows, such as `medium` or `distil-large-v3.5`;
+   - a Hugging Face repository holding a model converted for faster-whisper (CTranslate2
+     format), written as `someone/some-model`;
+   - a folder on your PC holding such a model, such as `D:\Models\my-whisper`.
+3. Save the file and open ProfMute. The model is in the **Whisper model** list, and it downloads
+   itself the first time you use it.
+
+The first line of the file is the default. To remove a model from the list, delete its line;
+deleting `models.txt` brings back the original list.
+
+### Adding a voice model
+
+The voice models (see [How a muted word sounds](#how-a-muted-word-sounds)) are listed in
+`voice-models.txt` the same way, one per line:
+
+```
+name | architecture | weights address | settings address
+```
+
+- **architecture** is `mel_band_roformer` or `bs_roformer`, the two kinds ProfMute can run.
+- **weights address** is a download link to the model's `.ckpt` file.
+- **settings address** is a download link to its settings file (`.yaml`), in the format of
+  [Music-Source-Separation-Training](https://github.com/ZFTurbo/Music-Source-Separation-Training),
+  where many such files can be found. Use links to the raw file, not to a web page.
+- The model has to be a *vocals* model with one output: its settings file says `num_stems: 1`
+  and `target_instrument: vocals`.
+
+Save the file, open ProfMute, and choose the model in the **Voice model** list. It downloads into
+the `voice-models` folder the first time it is used. The first line of the file is the default.
 
 ## What you get
 
 - `<movie>.clean.mkv`: the copy with the words muted. Video and other tracks are copied as they
   are; only the cleaned audio track is re-encoded (AAC).
-- `<movie>.clean.en.srt`: the subtitles with the words deleted. Media players and Plex pick it up
-  by its name. **The subtitle tracks inside the clean `.mkv` are copies of the originals and still
+- `<movie>.clean.en.srt`: the subtitles with the words deleted (or, with **Speak a clean word**, the
+  spoken word in their place). The lines and their timing are the original file's, shifted only when
+  the whole file runs early or late. Media players and Plex pick it up by its name. **The subtitle tracks inside the clean `.mkv` are copies of the originals and still
   contain the words**, so select the `.srt` when watching.
 - `<movie>.profmute.txt`, next to the clean copy unless you chose the log folder: every muted
   spot with its time and length, how conflicts were settled, anything `UNRESOLVED`, and the

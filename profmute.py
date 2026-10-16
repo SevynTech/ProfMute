@@ -26,7 +26,7 @@ import argparse, bisect, gc, json, os, re, shutil, subprocess, sys, tempfile
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -75,9 +75,11 @@ piss*
 dick
 dicks
 douche*
+blowjob*
 
 [phrases]
 # Several words on a line: muted from the first word to the last, when said together.
+blow job*
 son of a bitch*
 sons of bitches
 god damn*
@@ -105,6 +107,13 @@ bullsh
 horsesh
 bitc
 assh
+
+[replacements]
+# Only used with "Speak a clean word": your own choice of clean word, used instead of the AI's choice.
+#   swear = clean word       (a * stands for "any letters", as above)
+# For example (remove the # to use a line):
+#   motherfucker* = son of a gun
+#   son of a bitch* = son of a gun
 """
 
 # ---- Likewise for models.txt: the Whisper models the window offers. No download locations or sizes
@@ -147,6 +156,7 @@ SR = 16000           # sample rate Whisper wants
 SRT_TOL = 1.5        # seconds; a subtitle hit counts as heard if Whisper has a hit this close to the line
 RESCAN_PAD = 2.0     # seconds of audio added on each side of a subtitle line when re-listening
 OFFSET_SEARCH = 30.0 # seconds; how far out of sync a subtitle file may be and still get lined up
+OFFSET_SEARCH_WIDE = 120.0  # tried when that fails (e.g. Saving Private Ryan's subtitles: 40 s late throughout)
 OFFSET_BIN = 0.2
 MIN_AGREEMENT = 0.3  # share of subtitle lines that must agree on the sync, else the file is ignored
 LISTENS = ((2.0, 2.0), (4.0, 3.0))   # seconds of audio before/after a word for its second and third listen
@@ -347,6 +357,11 @@ def channel_names(layout, channels):
     return names if len(names) == channels and all(names) else None
 
 
+def first_line(e):
+    """An error's message, short enough for a log line."""
+    return (str(e).strip().splitlines() or [type(e).__name__])[0][:300]
+
+
 def mute_samples(data, rate, spans, ramp, fills=None):
     """Take the words out of data (frames x channels), in place.
 
@@ -423,7 +438,7 @@ def groups(targets, names):
     return out + [[t] for t in targets]
 
 
-def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_front=(), voice=None):
+def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_front=(), voice=None, speaking=None):
     """Write the clean copy: every stream of the movie copied as it is, except the cleaned audio track.
 
     The track is decoded once to a temporary file on the output drive. Only the muted stretches are
@@ -432,6 +447,8 @@ def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_fr
     left/right for the spans whose index is in also_front (the word was heard there too).
     voice: a VoiceRemover; the changed channels then keep their music and effects and lose only the voice.
     fade: each change fades in just before its stretch and out just after it.
+    speaking: with --speak, {"sentences", "words", "model", "device"} for speak.speak(): the chosen clean
+    words are then said in the actor's voice, laid over the muted track.
     -> a sentence for the log saying how it was done
     """
     import numpy as np
@@ -483,7 +500,21 @@ def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_fr
                         fill[:, targets.index(c)] = clean[:, k]
                 fills.append(fill)
             print()
+        pieces, dialogue = [], None
+        if speaking and voice:
+            import speak
+            dialogue = [names.index("FC")] if names and "FC" in names else list(range(min(2, channels)))
+            try:
+                pieces = speak.speak(data, rate, top, dialogue, speaking["sentences"], [p[:2] for p in plan], voice,
+                                     speaking["model"], speaking["device"], speaking["words"], sys.modules[__name__])
+            except Exception as e:   # the clean copy must still be written: those words stay muted
+                speaking["trouble"] = f"Speaking the clean words failed ({first_line(e)}); those words were muted instead."
+                print("    " + speaking["trouble"])
         mute_samples(data, rate, plan, ramp, fills)
+        for first, frames, sound, blend in pieces:     # the spoken words, over the muted track
+            now = data[first:first + frames, dialogue].astype(np.float64) / top
+            mixed = now * (1 - blend[:, None]) + sound * blend[:, None]
+            data[first:first + frames, dialogue] = np.clip(np.round(mixed * top), -top - 1, top).astype(data.dtype)
         data.flush()
         del data
 
@@ -541,22 +572,30 @@ class WordListError(ValueError):
 
 class Rules:
     """A loaded word list. words/censored/cutoff are single regexes, phrases a list of regex lists."""
-    def __init__(self, words, phrases, censored, cutoff, source):
+    def __init__(self, words, phrases, censored, cutoff, source, replacements=()):
         star = lambda entry: "[a-z]*".join(re.escape(part) for part in entry.split("*"))
         either = lambda patterns: re.compile("|".join(f"(?:{p})" for p in patterns) or "(?!)")
         self.words = either(star(w) for w in words)
         self.phrases = [[re.compile(star(w)) for w in phrase] for phrase in phrases]
         self.censored = either(censored)
         self.cutoff = either(re.escape(c) for c in cutoff)
+        # [replacements]: (pattern for the swear's words, space-separated letters only, its clean word)
+        self.replacements = [(re.compile(" ".join(star(w) for w in pattern)), clean) for pattern, clean in replacements]
         self.source = source
-        self.summary = f"{len(words)} words, {len(phrases)} phrases"
+        self.summary = f"{len(words)} words, {len(phrases)} phrases" + \
+                       (f", {len(replacements)} replacements" if replacements else "")
+
+    def replacement(self, swear):
+        """The word list's own clean word for a swear (its words as heard), or None."""
+        tok = " ".join(norm(w)[1] for w in swear.split())
+        return next((clean for pattern, clean in self.replacements if pattern.fullmatch(tok)), None)
 
 
 def parse_words(text, source):
     """Read a word list (see DEFAULT_WORDS for the format). Raises WordListError naming every bad line."""
     sections = {"words": "words", "word": "words", "phrases": "words", "phrase": "words",
-                "censored": "censored", "cutoff": "cutoff"}
-    section, words, phrases, censored, cutoff, problems = "words", [], [], [], [], []
+                "censored": "censored", "cutoff": "cutoff", "replacements": "replacements", "replacement": "replacements"}
+    section, words, phrases, censored, cutoff, replacements, problems = "words", [], [], [], [], [], []
     for n, line in enumerate(text.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -565,9 +604,19 @@ def parse_words(text, source):
         if header:
             section = sections.get(re.sub(r"[^a-z]", "", header.group(1).lower()))
             if section is None:
-                problems.append(f"line {n}: unknown section {line} (use [words], [phrases], [censored] or [cut-off])")
+                problems.append(f"line {n}: unknown section {line} "
+                                "(use [words], [phrases], [censored], [cut-off] or [replacements])")
             continue
         if section is None:
+            continue
+        if section == "replacements":
+            swear, eq, clean = line.partition("=")
+            pattern = [re.sub(r"[^a-z*]", "", w) for w in swear.lower().split()]
+            clean = " ".join(clean.split())
+            if not eq or not pattern or any(not p.replace("*", "") for p in pattern) or not re.search(r"[A-Za-z]", clean):
+                problems.append(f"line {n}: a replacement is written as  swear = clean word  : {line}")
+            else:
+                replacements.append((pattern, clean))
             continue
         if section == "censored":
             try:
@@ -588,9 +637,19 @@ def parse_words(text, source):
             phrases.append(entries)
     if not problems and not words and not phrases:
         problems.append("the list has no words in it")
+    rules = None if problems else Rules(words, phrases, censored, cutoff, source, replacements)
+    if rules and replacements:   # a clean word that is itself on the list would put a swear back
+        global RULES
+        saved, RULES = globals().get("RULES"), rules       # find_hits reads the list in force
+        try:
+            for pattern, clean in replacements:
+                if find_hits([(i, i + 0.5, w, *norm(w)) for i, w in enumerate(clean.split())]):
+                    problems.append(f"the replacement for {' '.join(pattern)} is itself on the list: {clean}")
+        finally:
+            RULES = saved
     if problems:
         raise WordListError("\n".join(problems))
-    return Rules(words, phrases, censored, cutoff, source)
+    return rules
 
 
 RULES = parse_words(DEFAULT_WORDS, "built-in list")
@@ -687,7 +746,6 @@ def load_model(name, want):
     import ctranslate2
     import numpy as np
     from faster_whisper import WhisperModel
-    first_line = lambda e: (str(e).strip().splitlines() or [type(e).__name__])[0][:300]
     try:
         gpu = want != "cpu" and ctranslate2.get_cuda_device_count() > 0
     except Exception:
@@ -801,21 +859,38 @@ def cue_hits(text):
     return [label for _, _, label in cue_scan(text)[1]]
 
 
-def clean_cue(text):
+def clean_cue(text, spoken=None):
     """One subtitle cue with its profanity deleted. -> (new text, '' if nothing is left; words deleted)
 
     The words are simply removed. A deleted word hands its sentence-ending punctuation to the word
     before it ("Oh, shit." -> "Oh."), and the next word is capitalized when the sentence now starts
     there ("Damn it." -> "It."). Lines and cues with no words left are dropped.
+    spoken = {hit number in this cue: clean word said in its place}: those are swapped, not deleted
+    ("Fuck no." -> "Heck no.").
     """
     pieces, hits = cue_scan(text)
     if not hits:
         return text, 0
-    drop = {i + k for i, n, _ in hits for k in range(n)}
+    spoken = spoken or {}
+    swap = {i: (n, spoken[h]) for h, (i, n, _) in enumerate(hits) if h in spoken}
+    absorbed = {i + k for i, (n, _) in swap.items() for k in range(1, n)}     # the rest of a swapped phrase
+    drop = {i + k for h, (i, n, _) in enumerate(hits) if h not in spoken for k in range(n)}
     kept = []                # [line number, lead tags, body, trail tags] of the words that stay
     carry, capitalize = "", False   # tags/quotes owed to the next kept word; capitalize it?
     for i, (line, piece) in enumerate(pieces):
         lead, body, trail = SPLIT_TAGS.match(piece).groups()
+        if i in absorbed:
+            continue
+        if i in swap:
+            n, clean = swap[i]
+            opening = re.match(r"[^\w*]*", body).group()
+            closing = re.search(r"[^\w*]*$", SPLIT_TAGS.match(pieces[i + n - 1][1]).group(2)).group()
+            said = body[len(opening):]
+            if said[:2].isupper() and said[:2].isalpha():
+                clean = clean.upper()
+            elif said[:1].isupper():
+                clean = clean[:1].upper() + clean[1:]
+            body, trail = opening + clean + closing, SPLIT_TAGS.match(pieces[i + n - 1][1]).group(3)
         if i not in drop:
             if capitalize and body[:1].islower():
                 body = body[:1].upper() + body[1:]
@@ -847,17 +922,39 @@ def clean_cue(text):
         lines.setdefault(line, []).append(lead + body + trail)
     out = [" ".join(words) for _, words in sorted(lines.items())]
     out = [ln for ln in out if any(c.isalnum() for c in TAGS.sub("", ln))]
-    return "\n".join(out), len(hits)
+    return "\n".join(out), len(hits) - len(swap)
 
 
-def clean_srt(cues):
-    """-> (text of a subtitle file with the profanity deleted, words deleted, cues dropped as empty)"""
+def spoken_in_cues(cues, said):
+    """Which subtitle swear each spoken clean word replaced.
+    said = [(time, swear as Whisper heard it, clean word), ...] -> {(cue number, hit number in the cue): clean word}
+
+    The cue nearest the time (subtitle times are loose, so up to 1.5 s off) whose next unclaimed swear is
+    like the one heard ("fuckin'" / "fucking", "god damn" / "goddamn", "fucked" / "chest-fucked")."""
+    out = {}
+    key = lambda x: re.sub(r"[^a-z]", "", x.lower())
+    for t, swear, clean in sorted(said):
+        heard = key(swear)
+        near = sorted((max(cs - t, t - ce, 0), k) for k, (cs, ce, _) in enumerate(cues) if cs - 1.5 <= t <= ce + 1.5)
+        for _, k in near:
+            found = next(((k, h) for h, (_, _, label) in enumerate(cue_scan(cues[k][2])[1])
+                          if (k, h) not in out and key(label) and heard
+                          and (heard[:4] in key(label) or key(label)[:4] in heard)), None)
+            if found:
+                out[found] = clean
+                break
+    return out
+
+
+def clean_srt(cues, spoken=None):
+    """-> (text of a subtitle file with the profanity deleted, words deleted, cues dropped as empty)
+    spoken = {(cue number, hit number): clean word} from spoken_in_cues(): those words are swapped in instead."""
     def t(x):
         ms = max(0, round(x * 1000))
         return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
     blocks, deleted, dropped = [], 0, 0
-    for cs, ce, text in cues:
-        new, n = clean_cue(text)
+    for k, (cs, ce, text) in enumerate(cues):
+        new, n = clean_cue(text, {h: w for (c, h), w in (spoken or {}).items() if c == k})
         deleted += n
         if new:
             blocks.append(f"{len(blocks) + 1}\n{t(cs)} --> {t(ce)}\n{new}\n")
@@ -866,8 +963,8 @@ def clean_srt(cues):
     return "\n".join(blocks), deleted, dropped
 
 
-def estimate_offset(cues, words):
-    """Guess how far the subtitles are shifted from the audio.
+def estimate_offset(cues, words, search=OFFSET_SEARCH):
+    """Guess how far the subtitles are shifted from the audio (looking up to `search` seconds either way).
 
     Each line votes with (when Whisper heard the line's first word) - (line start); the most popular
     shift wins. Returns (seconds to add to subtitle times, share of lines agreeing), or (0.0, None)
@@ -880,8 +977,8 @@ def estimate_offset(cues, words):
         tok = norm(pieces[0])[1] if pieces else ""
         if len(tok) < 3:
             continue
-        lo = bisect.bisect_left(starts, cs - OFFSET_SEARCH)
-        hi = bisect.bisect_right(starts, cs + OFFSET_SEARCH)
+        lo = bisect.bisect_left(starts, cs - search)
+        hi = bisect.bisect_right(starts, cs + search)
         bins = {round((w[0] - cs) / OFFSET_BIN) for w in words[lo:hi] if w[4] == tok}
         if bins:
             voters += 1
@@ -1235,6 +1332,9 @@ def main():
                     help="do not listen for the words in the front left/right speakers of a surround track")
     ap.add_argument("--no-separate", action="store_true",
                     help="silence the words instead of removing only the voice with an AI voice model")
+    ap.add_argument("--speak", action="store_true",
+                    help="say a clean word in the actor's own voice instead of muting a swear in normal speech "
+                         "(shouts stay muted). Needs an NVIDIA graphics card; downloads about 14 GB on first use")
     ap.add_argument("--voice-model", help="voice model to use (default: the first line of voice-models.txt)")
     ap.add_argument("--list-voice-models", action="store_true", help="print the models of voice-models.txt as JSON and exit")
     ap.add_argument("--confirm", action="store_true", help="listen to every word a second time to check where it is")
@@ -1281,7 +1381,7 @@ def main():
 
     print("1/4 Extracting audio...")
     samples = load_audio(src, a.audio_index)
-    cues, srt_name = [], None
+    cues, srt_name, usable_cues = [], None, []
     with tempfile.TemporaryDirectory() as tmp:
         if not a.no_srt:
             srt, srt_name = (Path(a.srt), a.srt) if a.srt else find_subtitle(src, tmp)
@@ -1305,6 +1405,10 @@ def main():
     else:
         print(f"3/4 Double-checking against subtitles ({srt_name})...")
         offset, agree = estimate_offset(cues, words)
+        if agree is not None and agree < MIN_AGREEMENT:     # made for a release that starts a little differently?
+            wide = estimate_offset(cues, words, OFFSET_SEARCH_WIDE)
+            if wide[1] is not None and wide[1] >= MIN_AGREEMENT:
+                offset, agree = wide
         if agree is not None and agree < MIN_AGREEMENT:
             print(f"    These subtitles do not line up with the audio (only {agree:.0%} of lines agree). Ignoring them.")
             notes.append(f"Subtitles: {srt_name} does NOT match this audio, ignored. Whisper only.")
@@ -1313,7 +1417,9 @@ def main():
                 offset = 0.0
             else:
                 print(f"    Subtitles are {abs(offset):.1f}s {'early' if offset > 0 else 'late'}, shifting them to match.")
-                cues = [(cs + offset, ce + offset, text) for cs, ce, text in cues]
+                cues = [(max(0.0, cs + offset), ce + offset, text) for cs, ce, text in cues
+                        if ce + offset > 0]     # a line shifted to before the start can't be heard: dropped
+            usable_cues = cues
             before = len(hits)
             hits, unresolved, relistened = subtitle_pass(model, samples, cues, hits,
                                                          lambda: load_audio(src, a.audio_index, VOICE_BAND))
@@ -1388,10 +1494,28 @@ def main():
         return
 
     print("4/4 Writing clean copy (video copied, only the audio is re-encoded)...")
-    voice, trouble = None, None
+    voice, trouble, speaking = None, None, None
+    if a.speak:
+        import torch
+        if a.no_separate:
+            trouble = "Speaking a clean word needs the voice removal; the words were muted instead."
+        elif not torch.cuda.is_available():
+            trouble = "Speaking a clean word needs an NVIDIA graphics card; the words were muted instead."
+        if trouble:
+            print("    " + trouble)
     if not a.no_separate:
         del model                     # Whisper is done: make room on the graphics card for the voice model
         gc.collect()
+        if a.speak and not trouble:
+            import speak
+            span_of = lambda s, e: next(i for i, m in enumerate(merged) if m[0] <= s + 1e-6 and e <= m[1] + 1e-6)
+            sentences = speak.plan_sentences([(s, e, w, span_of(s, e)) for s, e, w, _ in hits], words, usable_cues)
+            try:   # Gemma has the graphics card to itself here, between Whisper and the voice model
+                speak.choose_words(sentences, sys.modules[__name__])
+                speaking = dict(sentences=sentences, words=words, model=model_name, device=a.device)
+            except Exception as e:
+                trouble = f"The clean words could not be chosen ({first_line(e)}); the words were muted instead."
+                print("    " + trouble)
         name = a.voice_model or load_voice_models()[0][0]
         try:
             print(f"    Loading the voice model {name} (its first use downloads it)...")
@@ -1401,10 +1525,32 @@ def main():
                       f"the words were silenced instead."
             print("    " + trouble)
     how = write_clean_audio(src, out, a.audio_index, [m[:2] for m in merged], not a.no_fade, not a.all_channels,
-                            also_front, voice)
+                            also_front, voice, speaking)
     print("    " + how)
+    spoken_lines = []
+    if speaking:
+        if speaking.get("trouble"):
+            trouble = " ".join(filter(None, [trouble, speaking["trouble"]]))
+        import speak
+        said = 0
+        for s in speaking["sentences"]:
+            result = s.get("result") or ("muted: " + s["muted"] if s["muted"] else "muted")
+            said += result.startswith("spoken")
+            line = speak.marked(s, s.get("picks")) if result.startswith("spoken") else speak.marked(s)
+            spoken_lines.append(f"{stamp(s['hit'][0][0])}  {result}  |  {line}")
+        how += f" Spoken clean words: {said} of {len(speaking['sentences'])} sentence(s); the rest stay muted."
+        print(f"    Spoke the clean word(s) in {said} of {len(speaking['sentences'])} sentence(s).")
+        if srt_text is not None and usable_cues:     # the subtitles say the clean word too, where it was spoken
+            swapped = spoken_in_cues(usable_cues, [(s["hit"][j][0], " ".join(w[2] for w in s["words"][f:l + 1]), s["picks"][j])
+                                                   for s in speaking["sentences"] if (s.get("result") or "").startswith("spoken")
+                                                   for j, (f, l) in enumerate(s["swears"])])
+            srt_text = clean_srt(usable_cues, swapped)[0]
+            how += f" Clean subtitles: {len(swapped)} spoken word(s) written in place of the swear."
     with open(log, "a", encoding="utf-8") as f:
         f.write((trouble + "\n" if trouble else "") + how + "\n")
+        if spoken_lines:
+            f.write("\nSPOKEN - the clean word said in the actor's voice, or why the word stayed muted:\n"
+                    + "\n".join(spoken_lines) + "\n")
     print("Done:", out)
     if srt_text is None:
         print("No subtitles to clean, so no clean subtitle file was written.")
