@@ -41,10 +41,11 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "..\dist\ProfMute\*"; DestDir: "{app}"; Excludes: "words.txt,models.txt,voice-models.txt"; Flags: recursesubdirs ignoreversion
-; the lists people edit: never overwrite their copy when a newer version is installed over an old one
-Source: "..\dist\ProfMute\words.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
-Source: "..\dist\ProfMute\models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
-Source: "..\dist\ProfMute\voice-models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
+; the lists people edit: never overwritten when a newer version is installed over an old one, and kept when
+; ProfMute is uninstalled (unless "Remove everything" is ticked then), so a reinstall finds them again
+Source: "..\dist\ProfMute\words.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "..\dist\ProfMute\models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "..\dist\ProfMute\voice-models.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Icons]
 Name: "{autoprograms}\ProfMute"; Filename: "{app}\ProfMute.exe"; WorkingDir: "{app}"
@@ -68,17 +69,91 @@ begin
     WizardForm.ProgressGauge.Style := npbstNormal;
 end;
 
+// Uninstalling: by default the word list, model lists, settings and logs stay, for a later install.
+// "Remove everything" (unticked unless chosen) takes those too, and the Whisper models ProfMute downloaded into
+// the user's Hugging Face folder (%USERPROFILE%\.cache\huggingface\hub\models--Systran--faster-whisper-*).
+// Asked right after Windows' own "Are you sure you want to remove ProfMute?", before anything is removed.
+function AskRemoveEverything(): Boolean;
+var
+  Form: TSetupForm;
+  Intro, Note: TNewStaticText;
+  Box: TNewCheckBox;
+  OkButton: TNewButton;
+begin
+  Form := CreateCustomForm(ScaleX(460), ScaleY(190), False, True);
+  try
+    Form.Caption := 'Uninstall ProfMute';
+    Intro := TNewStaticText.Create(Form);
+    Intro.Parent := Form;
+    Intro.AutoSize := False;
+    Intro.WordWrap := True;
+    Intro.SetBounds(ScaleX(16), ScaleY(14), Form.ClientWidth - ScaleX(32), ScaleY(44));
+    Intro.Caption := 'ProfMute and everything it downloaded into its folder will be removed. Your word list, '
+      + 'settings and logs are kept, so installing ProfMute again picks them up.';
+    Box := TNewCheckBox.Create(Form);
+    Box.Parent := Form;
+    Box.SetBounds(ScaleX(16), ScaleY(66), Form.ClientWidth - ScaleX(32), ScaleY(20));
+    Box.Caption := 'Remove everything';
+    Box.Checked := False;
+    Note := TNewStaticText.Create(Form);
+    Note.Parent := Form;
+    Note.AutoSize := False;
+    Note.WordWrap := True;
+    Note.SetBounds(ScaleX(34), ScaleY(88), Form.ClientWidth - ScaleX(50), ScaleY(58));
+    Note.Caption := 'Also your word list, settings and the logs in ProfMute''s folder, and the Whisper speech '
+      + 'models it downloaded (about 3 GB, in your user folder). Your clean copies and clean subtitles are never '
+      + 'removed.';
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Caption := 'Continue';
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+    OkButton.Cancel := True;
+    OkButton.SetBounds(Form.ClientWidth - ScaleX(96), Form.ClientHeight - ScaleY(36), ScaleX(80), ScaleY(25));
+    Form.ActiveControl := OkButton;
+    Form.ShowModal();
+    Result := Box.Checked;
+  finally
+    Form.Free();
+  end;
+end;
+
+var
+  RemoveEverything: Boolean;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  FindRec: TFindRec;
+  Hub: String;
+begin
+  if CurUninstallStep = usUninstall then
+    RemoveEverything := not UninstallSilent and AskRemoveEverything();
+  if (CurUninstallStep <> usPostUninstall) or not RemoveEverything then
+    Exit;
+  DelTree(ExpandConstant('{app}'), True, True, True);
+  Hub := ExpandConstant('{%USERPROFILE}') + '\.cache\huggingface\hub\';
+  if FindFirst(Hub + 'models--Systran--faster-whisper-*', FindRec) then
+  try
+    repeat
+      DelTree(Hub + FindRec.Name, True, True, True);
+    until not FindNext(FindRec);
+  finally
+    FindClose(FindRec);
+  end;
+end;
+
 [UninstallDelete]
-; what ProfMute downloaded or wrote by itself. The log folder is left alone: those are the user's records.
+; what ProfMute downloaded or wrote by itself. Kept: the log folder (the user's records), the settings and the
+; edited lists. "Remove everything" in the uninstaller removes those too (see [Code]).
 Type: filesandordirs; Name: "{app}\.venv"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\voice-models"
 Type: filesandordirs; Name: "{app}\speak-models"
+Type: filesandordirs; Name: "{app}\review"
 Type: filesandordirs; Name: "{app}\speak_stubs\tn\__pycache__"
 Type: filesandordirs; Name: "{app}\speak_stubs\tn\chinese\__pycache__"
 Type: filesandordirs; Name: "{app}\speak_stubs\tn\english\__pycache__"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\voice_separation\__pycache__"
 Type: filesandordirs; Name: "{app}\launcher\__pycache__"
-Type: files; Name: "{app}\profmute_gui.json"
 Type: files; Name: "{app}\setup-log.txt"

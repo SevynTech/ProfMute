@@ -22,11 +22,11 @@ decide, --conflicts auto lets three listens decide. --confirm double-checks wher
 Subtitle lookup order: --srt, then <name>.en.srt / <name>.srt next to the movie, then an English
 text subtitle track inside the file.
 """
-import argparse, bisect, gc, json, os, re, secrets, shutil, subprocess, sys, tempfile
+import argparse, bisect, gc, hashlib, json, os, re, secrets, shutil, subprocess, sys, tempfile
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.3.1"
+__version__ = "1.4.0"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -499,6 +499,8 @@ def write_clean_audio(src, out, audio_index, spans, fade, dialogue_only, also_fr
              "-f", fmt, "-c:a", "pcm_" + fmt, raw])
         data = np.memmap(raw, dtype=dtype, mode="r+")
         data = data[:data.size - data.size % channels].reshape(-1, channels)
+        end = len(data) / rate        # a stretch past the end of the sound (a subtitle line after it): cut short or dropped
+        plan = [(s, min(e, end), targets) for s, e, targets in plan if s < end - 0.01]
         ramp, top = int(FADE * rate) if fade else 0, float(np.iinfo(dtype).max)
         fills = None
         if voice:
@@ -1205,13 +1207,11 @@ def estimate_spot(cue, first, count, words):
     return max(0.0, middle - length / 2 - 0.25), middle + length / 2 + 0.25   # a quarter second of margin: it is a guess
 
 
-def decide_unresolved(samples, words, cues, unresolved):
-    """Ask the user about each word that is in the subtitles but was never heard.
-
-    unresolved = [(line_start, line_end, label, cue_index), ...]
-    -> (spans to mute [(start, end, text, tag), ...], {index in unresolved: what was decided, for the log})
-    """
-    mute, decided, clips, used = [], {}, None, set()
+def unresolved_questions(samples, words, cues, unresolved, clips=None):
+    """One question per word that is in the subtitles but was never heard, with the estimated spot.
+    unresolved = [(line_start, line_end, label, cue_index), ...]; clips = a folder for the Play clips, or None.
+    -> [{"info": the question, "line": (start, end), "spot": (start, end), "label": the word}, ...]"""
+    out, used = [], set()
     for n, (cs, ce, label, k) in enumerate(unresolved):
         scan = cue_scan(cues[k][2])[1]
         at = next((x for x in range(len(scan)) if scan[x][2] == label and (k, x) not in used), 0)
@@ -1222,44 +1222,107 @@ def decide_unresolved(samples, words, cues, unresolved):
                 "line": flat(cues[k][2]), "line_seconds": ce - cs,
                 "heard": " ".join(w[2] for w in words if w[0] >= cs - 0.5 and w[1] <= ce + 0.5),
                 "spot": f"{stamp(s)} to {stamp(e)}", "spot_seconds": e - s, "clip": None, "clip_spot": None}
-        if sys.stdin is None or not sys.stdin.isatty():  # the window can play both stretches
-            clips = clips or tempfile.mkdtemp(prefix="profmute-")
+        if clips:   # the window can play both stretches
             info["clip"] = save_clip(os.path.join(clips, f"line{n + 1}.wav"), samples, cs - 0.75, ce + 0.75)
             info["clip_spot"] = save_clip(os.path.join(clips, f"spot{n + 1}.wav"), samples, s, e)
-        answer = ask_user(info)
-        if answer == "line":
+        out.append({"info": info, "line": [cs, ce], "spot": [s, e], "label": label})
+    return out
+
+
+def apply_unresolved(questions, answers):
+    """answers = {question number: 'line' / 'spot' / 'leave' / 'auto' (leave this and the rest)}; a question
+    left unanswered is left in. -> (spans to mute [(start, end, text, tag), ...], {index: what was decided})"""
+    mute, decided, rest = [], {}, False
+    for n, q in enumerate(questions):
+        answer = answers.get(q["info"]["n"])
+        (cs, ce), (s, e), label = q["line"], q["spot"], q["label"]
+        if rest:
+            decided[n] = "left in (your choice: leave the rest)"
+        elif answer == "line":
             mute.append((cs, ce, label, "unresolved: you muted the whole subtitle line"))
             decided[n] = "whole line muted (your choice)"
         elif answer == "spot":
             mute.append((s, e, label, "unresolved: you muted an estimated spot"))
             decided[n] = f"estimated spot {stamp(s)} muted (your choice)"
-        else:
+        elif answer in ("leave", "auto"):
             decided[n] = "left in (your choice)"
-            if answer == "auto":
-                decided.update({m: "left in (your choice: leave the rest)" for m in range(n + 1, len(unresolved))})
-                break
-    if clips:
-        shutil.rmtree(clips, ignore_errors=True)
+            rest = answer == "auto"
+        else:
+            decided[n] = "left in (not answered)"
     return mute, decided
 
 
-def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
+def decide_unresolved(samples, words, cues, unresolved):
+    """Ask the user now about each word that is in the subtitles but was never heard.
+    -> (spans to mute [(start, end, text, tag), ...], {index in unresolved: what was decided, for the log})
+    """
+    window = sys.stdin is None or not sys.stdin.isatty()
+    clips = tempfile.mkdtemp(prefix="profmute-") if window else None
+    try:
+        questions, answers = unresolved_questions(samples, words, cues, unresolved, clips), {}
+        for q in questions:
+            answers[q["info"]["n"]] = answer = ask_user(q["info"])
+            if answer == "auto":
+                break
+        return apply_unresolved(questions, answers)
+    finally:
+        if clips:
+            shutil.rmtree(clips, ignore_errors=True)
+
+
+def conflict_outcome(answer, where, s, e, text, get_vote):
+    """What one conflict comes to, given the answer ('mute', 'leave', or anything else: the listens decide).
+    -> (spans to mute [(start, end, text, tag)], the line for the log). get_vote() -> (verdict, spans, heard)."""
+    line = f"{stamp(where[0])}  {text}"
+    if answer == "mute":
+        return [(where[0], where[1], text, "conflict: you chose to mute")], line + "  ->  muted (your choice)"
+    if answer == "leave":
+        return [], line + "  ->  left in (your choice)"
+    verdict, spans, heard = get_vote()
+    if verdict == "unsure":
+        times, of = heard.split(" of ")
+        why = "heard in a different place on every listen" if times == of else \
+              f"heard in {heard} listens, but never twice in the same place" if int(times) > 1 else \
+              f"heard in only {heard} listens"
+        return [], f"{stamp(s)}  {text}  ->  left in ({why})"
+    return [(a, b, text, f"conflict: heard in {heard} listens") for a, b in spans], \
+        f"{stamp(spans[0][0])}  {text}  ->  muted (heard in {heard} listens)"
+
+
+def resolve_conflicts(pending, answers):
+    """The conflicts saved for later (settle(..., conflicts='later')), with the answers given since.
+    answers = {question number: 'mute' / 'leave' / 'auto'}; 'auto' lets the listens decide this one and the
+    rest, as does a question left unanswered. -> (spans to mute, lines for the log)"""
+    mute, report, auto = [], [], False
+    for p in pending:
+        answer = "auto" if auto else answers.get(p["info"]["n"], "auto")
+        auto = auto or answer == "auto"
+        spans, line = conflict_outcome(answer, p["where"], p["s"], p["e"], p["text"], lambda p=p: p["vote"])
+        mute += [tuple(x) for x in spans]
+        report.append(line)
+    return mute, report
+
+
+def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry, clips_dir=None):
     """Decide what is muted: optional second listens for every hit, then the conflicts.
 
     hits    = [(start, end, text, tag), ...] sorted by time
     backed  = indexes of the hits the subtitles back up, or None when no subtitles are in use
-    -> (hits to mute, conflict lines for the log, Counter of what happened)
+    conflicts = 'ask' (now), 'auto' (the listens decide) or 'later': each conflict becomes a question saved for
+              later (see resolve_conflicts), its Play clip kept in clips_dir
+    -> (hits to mute, conflict lines for the log, Counter of what happened, the questions saved for later)
     """
     is_conflict = lambda i: backed is not None and i not in backed
+    later = conflicts == "later" and not dry
     asking = conflicts == "ask" and not dry
-    votes, stats, mute, report = {}, Counter(), [], []   # stats: how many votes ended confirmed/moved/unsure
+    votes, stats, mute, report, pending = {}, Counter(), [], [], []   # stats: how many votes ended confirmed/moved/unsure
 
     def get_vote(i):
         if i not in votes:
             votes[i] = vote(model, samples, hits[i], hits[:i] + hits[i + 1:])
         return votes[i]
 
-    need = [i for i in range(len(hits)) if confirm or (is_conflict(i) and conflicts == "auto")]
+    need = [i for i in range(len(hits)) if confirm or (is_conflict(i) and conflicts in ("auto", "later"))]
     for n, i in enumerate(need, 1):
         print(f"\r    listening again {n}/{len(need)}", end="", flush=True)
         get_vote(i)
@@ -1288,7 +1351,7 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
             stats["conflict"] += 1
             continue
         answer = "auto"
-        if asking:
+        if asking or later:
             near = [w for w in words if s - 4 <= w[0] <= e + 4]
             before = " ".join(w[2] for w in near if w[1] <= s + 0.01)
             after = " ".join(w[2] for w in near if w[0] >= e - 0.01)
@@ -1297,109 +1360,91 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry):
                     "after": after if len(after) <= 80 else after[:80].rpartition(" ")[0] + " ...",
                     "subtitles": "  /  ".join(flat(c[2]) for c in cues if c[0] < e + 3 and c[1] > s - 3),
                     "listens": f"heard in {heard} listens" if heard else None, "clip": None}
-            if sys.stdin is None or not sys.stdin.isatty():  # the window can play it: a few seconds around the word
-                clips = clips or tempfile.mkdtemp(prefix="profmute-")
+            if later or sys.stdin is None or not sys.stdin.isatty():  # the window can play it: a few seconds around it
+                clips = clips_dir if later else clips or tempfile.mkdtemp(prefix="profmute-")
                 info["clip"] = save_clip(os.path.join(clips, f"conflict{info['n']}.wav"), samples,
                                          where[0] - 3, where[1] + 3)
+            if later:
+                pending.append({"info": info, "where": list(where), "s": s, "e": e, "text": text, "vote": get_vote(i)})
+                stats["conflict"] += 1
+                continue
             answer = ask_user(info)
             if answer == "auto":
                 asking = False
-        if answer == "mute":
-            mute.append((where[0], where[1], text, "conflict: you chose to mute"))
-            report.append(line + "  ->  muted (your choice)")
-        elif answer == "leave":
-            report.append(line + "  ->  left in (your choice)")
-        else:
-            verdict, spans, heard = get_vote(i)
-            if verdict == "unsure":
-                times, of = heard.split(" of ")
-                why = "heard in a different place on every listen" if times == of else \
-                      f"heard in {heard} listens, but never twice in the same place" if int(times) > 1 else \
-                      f"heard in only {heard} listens"
-                report.append(f"{stamp(s)}  {text}  ->  left in ({why})")
-            else:
-                mute += [(a, b, text, f"conflict: heard in {heard} listens") for a, b in spans]
-                report.append(f"{stamp(spans[0][0])}  {text}  ->  muted (heard in {heard} listens)")
+        spans, line = conflict_outcome(answer, where, s, e, text, lambda i=i: get_vote(i))
+        mute += spans
+        report.append(line)
         stats["conflict"] += 1
-    if clips:
+    if clips and not later:
         shutil.rmtree(clips, ignore_errors=True)
     stats.update(v[0] for v in votes.values())
-    return sorted(mute), report, stats
+    return sorted(mute), report, stats, pending
 
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- analysing now, writing later
 
-def main():
-    ap = argparse.ArgumentParser(description="Mute profanity in a video's main audio track.")
-    ap.add_argument("file", nargs="?", help="the movie")
-    ap.add_argument("--dry", action="store_true", help="only list hits, write no video")
-    ap.add_argument("--model", help="Whisper model (default: the first line of models.txt)")
-    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
-                    help="auto = the NVIDIA GPU when there is one, else the CPU")
-    ap.add_argument("--audio-index", type=int, default=0, help="which audio stream to clean (0 = first)")
-    ap.add_argument("--srt", help="subtitle file to double-check against (default: auto-detect)")
-    ap.add_argument("--no-srt", action="store_true", help="skip the subtitle double-check")
-    ap.add_argument("--words", help="word list file (default: words.txt next to this program)")
-    ap.add_argument("--out", help="where to write the clean copy (default: <name>.clean.mkv next to the movie)")
-    ap.add_argument("--out-srt", help="where to write the clean subtitles (default: <clean copy name>.en.srt next to it)")
-    ap.add_argument("--log-dir", help='folder for the log (default: a "log" folder next to this program)')
-    ap.add_argument("--pad-before", type=float, default=PAD_BEFORE, help="seconds muted before each word")
-    ap.add_argument("--pad-after", type=float, default=PAD_AFTER, help="seconds muted after each word")
-    ap.add_argument("--no-fade", action="store_true",
-                    help=f"switch each mute on and off instantly, instead of fading over {FADE * 1000:.0f} ms just around it")
-    ap.add_argument("--all-channels", action="store_true",
-                    help="mute every channel of a surround track, not just its centre (dialogue) channel")
-    ap.add_argument("--no-front-check", action="store_true",
-                    help="do not listen for the words in the front left/right speakers of a surround track")
-    ap.add_argument("--no-separate", action="store_true",
-                    help="silence the words instead of removing only the voice with an AI voice model")
-    ap.add_argument("--speak", action="store_true",
-                    help="say a clean word in the actor's own voice instead of muting a swear in normal speech "
-                         "(shouts stay muted). Needs an NVIDIA graphics card; downloads about 14 GB on first use")
-    ap.add_argument("--voice-model", help="voice model to use (default: the first line of voice-models.txt)")
-    ap.add_argument("--list-voice-models", action="store_true", help="print the models of voice-models.txt as JSON and exit")
-    ap.add_argument("--confirm", action="store_true", help="listen to every word a second time to check where it is")
-    ap.add_argument("--conflicts", choices=("ask", "auto"), default="auto",
-                    help="a word the subtitles do not have: ask = you decide, auto = three listens decide")
-    ap.add_argument("--unresolved", choices=("ask", "leave"), default="leave",
-                    help="a subtitle word that was never heard: ask = you decide (mute the line, an estimated "
-                         "spot, or nothing), leave = list it in the log and mute nothing")
-    ap.add_argument("--list-models", action="store_true", help="print the models of models.txt as JSON and exit")
-    ap.add_argument("--version", action="version", version=f"ProfMute {__version__}")
-    a = ap.parse_args()
-    sys.stdout.reconfigure(errors="replace")
-    if a.list_models:
-        return print(json.dumps(list_models()))
-    if a.list_voice_models:
-        return print(json.dumps(list_voice_models()))
-    if not a.file:
-        ap.error("which movie?")
-    if a.pad_before < 0 or a.pad_after < 0:
-        sys.exit("padding cannot be negative")
+REVIEW_VERSION = 1   # of the saved analysis: one saved by another version is analysed again
 
-    src = Path(a.file)
-    if not src.is_file():
-        sys.exit(f"file not found: {src}")
-    if a.srt and not Path(a.srt).is_file():
-        sys.exit(f"subtitle file not found: {a.srt}")
-    out = Path(a.out) if a.out else src.with_name(src.stem + ".clean.mkv")
-    log = (Path(a.log_dir) if a.log_dir else HERE / "log") / (src.stem + ".profmute.txt")
-    if out.suffix.lower() != ".mkv":
-        sys.exit(f"the output file must end in .mkv: {out}")
-    if out.resolve() == src.resolve():
-        sys.exit("the output file is the movie itself; pick a different name so the original stays untouched")
-    out_srt = Path(a.out_srt) if a.out_srt else out.with_name(out.stem + ".en.srt")
-    if out_srt.suffix.lower() != ".srt":
-        sys.exit(f"the clean subtitle file must end in .srt: {out_srt}")
-    if a.srt and out_srt.resolve() == Path(a.srt).resolve():
-        sys.exit("the clean subtitle file is the subtitle file being read; pick a different name")
-    rules = use_words(a.words)
-    model_name = a.model or load_models()[0][0]
-    need_ffmpeg()
-    log.parent.mkdir(parents=True, exist_ok=True)
-    if not a.dry:
-        out.parent.mkdir(parents=True, exist_ok=True)
 
+def movie_identity(src):
+    st = Path(src).stat()
+    return {"path": os.path.normcase(str(Path(src).resolve())), "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def analysis_settings(a, src, rules, model_name):
+    """Everything an analysis depends on: a saved analysis is reused only when all of it is still the same."""
+    words = Path(rules.source)
+    text = words.read_bytes() if words.is_file() else DEFAULT_WORDS.encode()
+    return {"version": REVIEW_VERSION, "movie": movie_identity(src), "model": model_name,
+            "words": hashlib.sha1(text).hexdigest(), "confirm": a.confirm, "conflicts": a.conflicts,
+            "unresolved": a.unresolved, "srt": a.srt, "no_srt": a.no_srt, "audio_index": a.audio_index}
+
+
+def review_clips(path):
+    """The folder for a saved analysis's Play clips, next to it."""
+    return str(Path(path).with_suffix("")) + "-clips"
+
+
+def review_is_current(path, settings):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8")).get("settings") == settings
+    except (OSError, ValueError):
+        return False
+
+
+def save_review(path, state):
+    """Written whole or not at all: the window adds the answers to the same file later."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(state), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def load_review(path, src):
+    try:
+        state = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        sys.exit(f"The saved analysis {path} cannot be read ({first_line(e)}). Analyse the movie again.")
+    if state.get("movie") != movie_identity(src):
+        sys.exit("The movie file has changed since it was analysed. Analyse it again.")
+    return state
+
+
+def drop_review(path):
+    """After the clean copy is written, its saved analysis and clips are no longer needed."""
+    shutil.rmtree(review_clips(path), ignore_errors=True)
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def analyse(a, src, out, out_srt, model_name, rules, later, clips):
+    """Steps 1-3: listen, check against the subtitles, settle each word. later = save the questions instead of
+    asking them now (their Play clips go in `clips`). -> (state, the Whisper model). The state is plain data
+    (it can be saved as JSON): words, cues, usable, notes, hits, conflict_lines, unresolved, decided,
+    pending (conflict questions), questions (unresolved-word questions), out_srt, model."""
     print("1/4 Extracting audio...")
     samples = load_audio(src, a.audio_index)
     cues, srt_name, usable_cues = [], None, []
@@ -1451,20 +1496,140 @@ def main():
             notes.append(f"Subtitles: {srt_name}, {sync}. {relistened} line(s) re-listened to, "
                          f"{len(hits) - before} more hit(s) found, {len(unresolved)} unresolved.")
 
-    hits, conflict_lines, stats = settle(model, samples, hits, words, cues, backed, a.confirm, a.conflicts, a.dry)
+    conflicts = "later" if later and a.conflicts == "ask" else a.conflicts
+    hits, conflict_lines, stats, pending = settle(model, samples, hits, words, cues, backed, a.confirm, conflicts,
+                                                  a.dry, clips)
     if a.confirm:
         print(f"    Second listens: {stats['confirmed']} confirmed, {stats['moved']} moved, {stats['unsure']} uncertain.")
         notes.append(f"Second listens: {stats['confirmed']} confirmed, {stats['moved']} moved, "
                      f"{stats['unsure']} uncertain.")
-    if conflict_lines:
-        print(f"    {len(conflict_lines)} conflict(s): heard by Whisper, not in the subtitles.")
-    decided = {}
+    if conflict_lines or pending:
+        print(f"    {len(conflict_lines) + len(pending)} conflict(s): heard by Whisper, not in the subtitles.")
+    decided, questions = {}, []
     if unresolved and a.unresolved == "ask":
         if a.dry:
             decided = {n: "would ask you (preview)" for n in range(len(unresolved))}
+        elif later:
+            questions = unresolved_questions(samples, words, cues, unresolved, clips)
         else:
             more, decided = decide_unresolved(samples, words, cues, unresolved)
             hits = sorted(hits + more)
+    state = dict(words=[list(w) for w in words], cues=[list(c) for c in cues], usable=bool(usable_cues), notes=notes,
+                 hits=[list(h) for h in hits], conflict_lines=conflict_lines, unresolved=[list(u) for u in unresolved],
+                 decided=decided, pending=pending, questions=questions, out_srt=str(out_srt), model=model_name)
+    return state, model
+
+
+# ---------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(description="Mute profanity in a video's main audio track.")
+    ap.add_argument("file", nargs="?", help="the movie")
+    ap.add_argument("--dry", action="store_true", help="only list hits, write no video")
+    ap.add_argument("--model", help="Whisper model (default: the first line of models.txt)")
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                    help="auto = the NVIDIA GPU when there is one, else the CPU")
+    ap.add_argument("--audio-index", type=int, default=0, help="which audio stream to clean (0 = first)")
+    ap.add_argument("--srt", help="subtitle file to double-check against (default: auto-detect)")
+    ap.add_argument("--no-srt", action="store_true", help="skip the subtitle double-check")
+    ap.add_argument("--words", help="word list file (default: words.txt next to this program)")
+    ap.add_argument("--out", help="where to write the clean copy (default: <name>.clean.mkv next to the movie)")
+    ap.add_argument("--out-srt", help="where to write the clean subtitles (default: <clean copy name>.en.srt next to it)")
+    ap.add_argument("--log-dir", help='folder for the log (default: a "log" folder next to this program)')
+    ap.add_argument("--pad-before", type=float, default=PAD_BEFORE, help="seconds muted before each word")
+    ap.add_argument("--pad-after", type=float, default=PAD_AFTER, help="seconds muted after each word")
+    ap.add_argument("--no-fade", action="store_true",
+                    help=f"switch each mute on and off instantly, instead of fading over {FADE * 1000:.0f} ms just around it")
+    ap.add_argument("--all-channels", action="store_true",
+                    help="mute every channel of a surround track, not just its centre (dialogue) channel")
+    ap.add_argument("--no-front-check", action="store_true",
+                    help="do not listen for the words in the front left/right speakers of a surround track")
+    ap.add_argument("--no-separate", action="store_true",
+                    help="silence the words instead of removing only the voice with an AI voice model")
+    ap.add_argument("--speak", action="store_true",
+                    help="say a clean word in the actor's own voice instead of muting a swear in normal speech "
+                         "(shouts stay muted). Needs an NVIDIA graphics card; downloads about 14 GB on first use")
+    ap.add_argument("--voice-model", help="voice model to use (default: the first line of voice-models.txt)")
+    ap.add_argument("--list-voice-models", action="store_true", help="print the models of voice-models.txt as JSON and exit")
+    ap.add_argument("--confirm", action="store_true", help="listen to every word a second time to check where it is")
+    ap.add_argument("--conflicts", choices=("ask", "auto"), default="auto",
+                    help="a word the subtitles do not have: ask = you decide, auto = three listens decide")
+    ap.add_argument("--unresolved", choices=("ask", "leave"), default="leave",
+                    help="a subtitle word that was never heard: ask = you decide (mute the line, an estimated "
+                         "spot, or nothing), leave = list it in the log and mute nothing")
+    ap.add_argument("--review-file", help="analyse only: save the questions (conflicts, unresolved words) to this "
+                                          "file, to be answered later, and write nothing else")
+    ap.add_argument("--from-review", help="write the clean copy from an analysis saved with --review-file, with the "
+                                          "answers added to it since; unanswered questions are decided as without asking")
+    ap.add_argument("--list-models", action="store_true", help="print the models of models.txt as JSON and exit")
+    ap.add_argument("--version", action="version", version=f"ProfMute {__version__}")
+    a = ap.parse_args()
+    sys.stdout.reconfigure(errors="replace")
+    if a.list_models:
+        return print(json.dumps(list_models()))
+    if a.list_voice_models:
+        return print(json.dumps(list_voice_models()))
+    if not a.file:
+        ap.error("which movie?")
+    if a.pad_before < 0 or a.pad_after < 0:
+        sys.exit("padding cannot be negative")
+
+    src = Path(a.file)
+    if not src.is_file():
+        sys.exit(f"file not found: {src}")
+    if a.srt and not Path(a.srt).is_file():
+        sys.exit(f"subtitle file not found: {a.srt}")
+    out = Path(a.out) if a.out else src.with_name(src.stem + ".clean.mkv")
+    log = (Path(a.log_dir) if a.log_dir else HERE / "log") / (src.stem + ".profmute.txt")
+    if out.suffix.lower() != ".mkv":
+        sys.exit(f"the output file must end in .mkv: {out}")
+    if out.resolve() == src.resolve():
+        sys.exit("the output file is the movie itself; pick a different name so the original stays untouched")
+    out_srt = Path(a.out_srt) if a.out_srt else out.with_name(out.stem + ".en.srt")
+    if out_srt.suffix.lower() != ".srt":
+        sys.exit(f"the clean subtitle file must end in .srt: {out_srt}")
+    if a.srt and out_srt.resolve() == Path(a.srt).resolve():
+        sys.exit("the clean subtitle file is the subtitle file being read; pick a different name")
+    rules = use_words(a.words)
+    model_name = a.model or load_models()[0][0]
+    need_ffmpeg()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if not a.dry:
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+    # with --review-file: analyse only, and save the questions for later; with --from-review: write, with the answers
+    later = bool(a.review_file) and not a.dry
+    settings = analysis_settings(a, src, rules, model_name)
+    if later and review_is_current(a.review_file, settings):
+        print("Already analysed in an earlier batch: using that, and any answers you gave.")
+        return
+    if a.from_review:
+        state, model = load_review(a.from_review, src), None
+        more, resolved = resolve_conflicts(state["pending"], {int(k): v for k, v in state["answers"]["conflicts"].items()})
+        unmute, decided = apply_unresolved(state["questions"], {int(k): v for k, v in state["answers"]["unresolved"].items()})
+        hits = sorted([tuple(h) for h in state["hits"]] + more + unmute)
+        conflict_lines = sorted(state["conflict_lines"] + resolved)
+        if state["questions"]:
+            state["decided"] = decided
+        state.update(hits=hits, conflict_lines=conflict_lines)
+    else:
+        clips = None
+        if later:
+            clips = review_clips(a.review_file)
+            shutil.rmtree(clips, ignore_errors=True)
+            Path(clips).mkdir(parents=True, exist_ok=True)
+        state, model = analyse(a, src, out, out_srt, model_name, rules, later, clips)
+        if later:
+            save_review(a.review_file, dict(state, settings=settings, movie=movie_identity(src),
+                                            answers={"conflicts": {}, "unresolved": {}}))
+            asks = len(state["pending"]) + len(state["questions"])
+            print(f"Analysed: {len(state['hits'])} spot(s) to mute so far, {asks} question(s) saved for later.")
+            return
+    words, cues, notes = state["words"], [tuple(c) for c in state["cues"]], state["notes"]
+    usable_cues = cues if state["usable"] else []
+    hits, conflict_lines, unresolved = [tuple(h) for h in state["hits"]], state["conflict_lines"], state["unresolved"]
+    decided = {int(k): v for k, v in state["decided"].items()}
+    out_srt, model_name = Path(state["out_srt"]), state["model"]
     unresolved_lines = [f"{stamp(cs)}  {label}  <-  {flat(cues[k][2])}" + (f"  ->  {decided[n]}" if n in decided else "")
                         for n, (cs, _, label, k) in enumerate(unresolved)]
 
@@ -1484,6 +1649,8 @@ def main():
     if merged and not a.all_channels and not a.no_front_check:
         names = track_info(src, a.audio_index)[2]
         if names and "FC" in names and len(names) > 2:
+            if model is None:     # writing from a saved analysis: Whisper is needed again for this
+                model = load_model(model_name, a.device)[0]
             also_front = front_heard(model, src, a.audio_index, merged, names)
             print(f"    {len(also_front)} word(s) also heard in the front left/right speakers; changed there too.")
             notes.append(f"Front left/right check: the word was heard there too at {len(also_front)} of {len(merged)} spots.")
@@ -1512,6 +1679,8 @@ def main():
     for line in unresolved_lines:
         print(f"    UNRESOLVED {line}")
     if a.dry or not merged:
+        if a.from_review and not a.dry:
+            drop_review(a.from_review)
         return
 
     print("4/4 Writing clean copy (video copied, only the audio is re-encoded)...")
@@ -1579,6 +1748,8 @@ def main():
         out_srt.parent.mkdir(parents=True, exist_ok=True)
         out_srt.write_text(srt_text, encoding="utf-8")
         print("Clean subtitles:", out_srt)
+    if a.from_review:
+        drop_review(a.from_review)
 
 
 if __name__ == "__main__":

@@ -46,7 +46,14 @@ Windows may show "Windows protected your PC" because neither file is signed. Cho
 then **Run anyway**. If you would rather not run an exe at all, unzip the zip, open a terminal in
 the ProfMute folder and run `tools\uv.exe run python profmute_gui.py`.
 
-Removing ProfMute leaves two things behind on purpose: its `log` folder, if you used it, and the speech models, which are stored in `%USERPROFILE%\.cache\huggingface`.
+**Uninstalling** keeps what you made yours, so installing again picks it up: the word list, the
+model lists, your settings and the `log` folder in ProfMute's folder. Everything ProfMute
+downloaded into its folder (Python, the libraries, the voice and speaking models) is removed. The
+Whisper speech models stay too: they are stored in `%USERPROFILE%\.cache\huggingface`.
+
+To take it all, tick **Remove everything** in the window that appears while uninstalling (it is
+unticked unless you tick it): that also removes the word list, model lists, settings and logs, and
+the Whisper models ProfMute downloaded. Your clean copies and clean subtitles are never removed.
 
 ## Using it
 
@@ -91,6 +98,25 @@ folder) gets one named after it, as in `Output\Iron Man\Iron Man.clean.mkv`.
 
 Only ticked movies run, one after another. One failing does not stop the rest, and movies that
 already have a clean copy are skipped, so an interrupted batch can simply be started again.
+
+**Start it and walk away.** With "Listen to every movie first, then ask me everything at once"
+ticked (the default), a batch runs in three rounds, so you only need to be there for the middle one:
+
+1. **Listening.** Every movie is listened to and checked against its subtitles, without asking
+   anything. Start a big batch at night.
+2. **Questions.** All the questions about all the movies (the conflicts and unresolved words you
+   chose to be asked about) come one after another, each with its movie's name, its number among
+   all of them, and the Play buttons. Answer them in the morning.
+3. **Writing.** Every clean copy is written with your answers, without asking anything: it runs
+   while you are at work.
+
+Each answer is saved as you give it. If you press **Cancel** or close ProfMute during the
+questions, start the same batch again later: the movies are not listened to again, and only the
+questions you have not answered come back. The saved analyses are kept in a `review` folder next to
+ProfMute until each clean copy is written (ones never used are removed after a month).
+
+Unticked, each movie is listened to, asked about and written before the next one starts, so the
+batch waits for you at every movie with questions.
 
 If you use Plex, Jellyfin or Emby, point the output folder at a library folder and the clean copies
 show up after its next scan.
@@ -215,9 +241,10 @@ word, every place it was heard is muted.
 **Conflicts.** A conflict is a word Whisper heard that the subtitles do not contain. ProfMute plays
 a sound and asks you: it shows the word, the time, what Whisper heard around it and what the
 subtitles say, and **Play** lets you hear those few seconds. Choose **Mute it** or **Leave it**. In
-a batch, tick "Pause and ask me about conflicts" for the same question, or leave it unticked and
-three listens decide: the word is muted only if two of them hear it in the same place. Without
-subtitles there are no conflicts; everything Whisper hears is muted.
+a batch, tick "Ask me about conflicts" for the same question (asked all together after every movie
+has been listened to, see [Batch](#batch)), or leave it unticked and three listens decide: the word
+is muted only if two of them hear it in the same place. Without subtitles there are no conflicts;
+everything Whisper hears is muted.
 
 Even so, **watch the result before showing it to anyone**. The log tells you where to look.
 
@@ -342,6 +369,10 @@ Everything the window does is available from a terminal in the ProfMute folder:
 tools\uv.exe run python profmute.py "D:\Movies\Some Movie.mkv" --confirm
 tools\uv.exe run python profmute.py --help
 ```
+
+To listen now and answer later, as a batch does: run once with `--review-file answers.json`
+(it listens, saves the questions and writes nothing), add your answers to that file, then run the
+same command with `--from-review answers.json` instead to write the clean copy.
 
 ## Building from source
 

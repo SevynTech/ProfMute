@@ -6,7 +6,7 @@ It runs profmute.py as a separate process (one per movie) and shows its output, 
 command line version does applies here too. The word list (words.txt) and the model list
 (models.txt) sit next to this file and are meant to be edited.
 """
-import codecs, json, os, queue, re, shutil, subprocess, sys, threading
+import codecs, hashlib, json, os, queue, re, shutil, subprocess, sys, threading, time
 import tkinter as tk
 from collections import Counter
 from pathlib import Path
@@ -26,6 +26,7 @@ ICON = HERE / "profmute.ico"
 WORDS = HERE / "words.txt"
 MODELS = HERE / "models.txt"
 VOICE_MODELS = HERE / "voice-models.txt"
+REVIEW = HERE / "review"   # a batch's saved analyses and their questions, between listening and writing
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 VIDEO_EXT = (".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".webm")
@@ -39,9 +40,18 @@ CONFIRM_TIP = ("Whisper sometimes puts a word in the wrong spot.\n\n"
                "listens disagree, a third one settles it, and only the place two of them agree on is muted.\n\n"
                "Takes a little longer.")
 ASK_TIP = ("A conflict is a word Whisper heard that the subtitles do not have.\n\n"
-           "On: the batch stops at each one, plays a sound and lets you decide.\n"
-           "Off: the batch never waits for you. Three listens decide, and the word is muted only if "
+           "On: you decide each one, hearing it first.\n"
+           "Off: you are never asked. Three listens decide, and the word is muted only if "
            "two of them hear it in the same place.")
+LATER_TIP = ("On: a batch runs in three rounds, so it can run while you are away:\n"
+             "1. Every movie is listened to and checked, without asking anything.\n"
+             "2. All the questions about all the movies (conflicts and unresolved words, if you chose to be asked) "
+             "come together, one after another, each with its movie's name and Play buttons.\n"
+             "3. Every clean copy is written with your answers, without asking anything.\n\n"
+             "Your answers are saved as you give them: if you stop halfway, start the same batch again and only the "
+             "questions you have not answered come back (the movies are not listened to again).\n\n"
+             "Off: each movie is listened to, asked about and written before the next one starts, so the batch "
+             "waits for you at each movie with questions.")
 UNRESOLVED_TIP = ("An unresolved word is one the subtitles have but Whisper never heard, even after "
                   "listening to that line again. ProfMute knows which subtitle line it is in, but not exactly when it is said.\n\n"
                   "On: ProfMute plays a sound and shows you each one. You can play the line, then mute the whole "
@@ -205,6 +215,42 @@ def voice_label(row, recommended):
     return f"{row['name']}   -   {size_text(row.get('size'))}" + ("   -   recommended" if recommended else "") + flag
 
 
+def review_file(movie, out):
+    """Where a batch keeps one movie's analysis until its clean copy is written: one file per movie and clean copy."""
+    key = hashlib.sha1(f"{os.path.normcase(str(movie))}|{os.path.normcase(str(out))}".encode()).hexdigest()[:16]
+    return REVIEW / f"{key}.json"
+
+
+def prune_reviews(days=30):
+    """Analyses left over from batches never finished: removed after a month, with their clips."""
+    if not REVIEW.is_dir():
+        return
+    for f in REVIEW.glob("*.json"):
+        try:
+            if time.time() - f.stat().st_mtime > days * 86400:
+                profmute.drop_review(str(f))
+        except OSError:
+            pass
+
+
+def read_review(path):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def open_questions(data):
+    """The questions in a saved analysis still waiting for an answer: [("conflicts" | "unresolved", info), ...].
+    An answer of "auto" (decide the rest by yourself) answers the ones after it too."""
+    out = []
+    for part, items in (("conflicts", data.get("pending", [])), ("unresolved", data.get("questions", []))):
+        answers = data.get("answers", {}).get(part, {})
+        if "auto" not in answers.values():
+            out += [(part, q["info"]) for q in items if str(q["info"]["n"]) not in answers]
+    return out
+
+
 def is_our_output(path):
     """A file ProfMute wrote itself (<name>.clean.mkv, <name>.clean.en.srt): never batch input."""
     name = path.name.lower()
@@ -341,6 +387,10 @@ class App(ttk.Frame):
         self.popped = False      # the batch list has a window of its own
         self.ask_win = None      # the conflict pop-up, while one is open
         self.ask_info = {}       # and the question it shows
+        self.later = None        # a three-round batch (listen, ask, write): its jobs, each with its saved analysis
+        self.questions = []      # its question round: (job, "conflicts" | "unresolved", question) still to ask
+        self.reviewing = None    # and the one asked now
+        self.question_n = self.question_total = 0
         self.model_rows = []
 
         settings = load_settings()
@@ -361,6 +411,7 @@ class App(ttk.Frame):
         self.batch_out = tk.StringVar()
         self.skip_done = tk.BooleanVar(value=True)
         self.batch_ask = tk.BooleanVar(value=bool(settings.get("batch_ask", False)))
+        self.batch_later = tk.BooleanVar(value=bool(settings.get("batch_later", True)))
         self.own_folder = tk.BooleanVar(value=bool(settings.get("batch_own_folder", True)))
         self.log_beside = tk.BooleanVar(value=bool(settings.get("log_beside", True)))
         self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", True)))
@@ -445,14 +496,17 @@ class App(ttk.Frame):
         own = ttk.Checkbutton(options, text="Keep the folder layout in the output folder", variable=self.own_folder,
                               command=lambda: save_settings(batch_own_folder=self.own_folder.get()))
         skip = ttk.Checkbutton(options, text="Skip movies that already have a clean copy", variable=self.skip_done)
-        ask = ttk.Checkbutton(options, text="Pause and ask me about conflicts",
+        ask = ttk.Checkbutton(options, text="Ask me about conflicts",
                               variable=self.batch_ask, command=lambda: save_settings(batch_ask=self.batch_ask.get()))
+        later = ttk.Checkbutton(options, text="Listen to every movie first, then ask me everything at once",
+                                variable=self.batch_later, command=lambda: save_settings(batch_later=self.batch_later.get()))
         own.grid(row=0, column=0, sticky="w", padx=(0, 28))
         skip.grid(row=0, column=1, sticky="w")
         ask.grid(row=1, column=0, sticky="w", padx=(0, 28), pady=(4, 0))
-        for box, tip in ((own, OWN_FOLDER_TIP), (skip, SKIP_TIP), (ask, ASK_TIP)):
+        later.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        for box, tip in ((own, OWN_FOLDER_TIP), (skip, SKIP_TIP), (ask, ASK_TIP), (later, LATER_TIP)):
             Tooltip(box, tip)
-        self.inputs += [own, skip, ask]
+        self.inputs += [own, skip, ask, later]
 
         # --- shared by both tabs
         beside = ttk.Checkbutton(body, text="Put the log next to the clean copy", variable=self.log_beside,
@@ -1154,7 +1208,7 @@ class App(ttk.Frame):
                 cmd = self.command(movie) + shared + (["--srt", d["srt"]] if d["srt"] else []) + \
                       (["--log-dir", str(out.parent)] if log_beside else [])
                 jobs.append({"cmd": cmd if dry else cmd + ["--out", str(out)], "out": str(out),
-                             "title": movie.name, "iid": iid})
+                             "title": movie.name, "iid": iid, "movie": str(movie)})
                 self.show_row(iid, "Waiting")
                 continue
             skipped += 1
@@ -1176,16 +1230,28 @@ class App(ttk.Frame):
                 return
         if not jobs:
             return self.status.set(f"Nothing to do: all {skipped} movie(s) skipped.")
+        # listen to every movie first, ask everything together, then write: three rounds (see LATER_TIP)
+        self.later = None
+        if not dry and self.batch_later.get() and (self.batch_ask.get() or self.ask_unresolved.get()):
+            REVIEW.mkdir(exist_ok=True)
+            prune_reviews()
+            for j in jobs:
+                path = str(review_file(j["movie"], j["out"]))
+                j.update(review=path, round=1, write_cmd=j["cmd"] + ["--from-review", path],
+                         cmd=j["cmd"] + ["--review-file", path])
+            self.later = jobs[:]
         self.run_jobs(jobs, skipped)
 
     # ------------------------------------------------------------ running
 
-    def run_jobs(self, jobs, skipped=0):
-        self.text.configure(state="normal")
-        self.text.delete("1.0", "end")
-        self.text.configure(state="disabled")
+    def run_jobs(self, jobs, skipped=0, fresh=True):
+        """fresh=False: the next round of the same batch (the messages and the counts so far are kept)."""
+        if fresh:
+            self.text.configure(state="normal")
+            self.text.delete("1.0", "end")
+            self.text.configure(state="disabled")
+            self.results = Counter(skipped=skipped)
         self.jobs, self.job_n, self.job_total = list(jobs), 0, len(jobs)
-        self.results = Counter(skipped=skipped)
         self.cancelled = False
         self.set_running(True)
         self.status.set("Starting...")
@@ -1197,7 +1263,7 @@ class App(ttk.Frame):
         self.writing, self.pending_cr, self.found, self.linebuf = None, False, None, ""
         if "iid" in job:
             self.write(f"{'' if self.job_n == 1 else chr(10)}===== [{self.job_n}/{self.job_total}] {job['title']} =====\n")
-            self.show_row(job["iid"], "Running...")
+            self.show_row(job["iid"], {1: "Listening...", 3: "Writing..."}.get(job.get("round"), "Running..."))
             self.tree.see(job["iid"])
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         self.proc = subprocess.Popen(job["cmd"], cwd=HERE, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1268,6 +1334,7 @@ class App(ttk.Frame):
                 t.insert("end", part)
                 if re.match(r"\d/\d ", part):
                     batch = f"[{self.job_n}/{self.job_total}] " if self.job and "iid" in self.job else ""
+                    batch = {1: "Listening ", 3: "Writing "}.get((self.job or {}).get("round"), "") + batch
                     self.status.set(batch + part.strip())
                     if part.startswith("4/4") and self.job:
                         self.writing = self.job["out"]
@@ -1279,23 +1346,25 @@ class App(ttk.Frame):
 
     # ------------------------------------------------------------ conflicts: the user decides
 
-    def ask(self, info):
-        """The script waits for an answer about a conflict or an unresolved word: show the question."""
+    def ask(self, info, movie=None, number=None):
+        """Show a question about a conflict or an unresolved word: the script waits for the answer, or (in a
+        batch's question round, with the movie's name and the question's number among all of them) it is saved."""
         self.ask_info = info
         unresolved = info.get("kind") == "unresolved"
         what = "unresolved word" if unresolved else "conflict"
-        self.status.set(f"Waiting for you: {what} {info['n']} of {info['of']}")
-        if winsound:
+        counted = f"question {number[0]} of {number[1]}" if number else f"{what} {info['n']} of {info['of']}"
+        self.status.set(f"Waiting for you: {counted}")
+        if winsound and (not number or number[0] == 1):   # in the question round: one beep at the start
             winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         win = self.ask_win = tk.Toplevel(self.root)
-        win.title(f"ProfMute - {what} {info['n']} of {info['of']}")
+        win.title(f"ProfMute - {counted}")
         win.transient(self.root)
         win.resizable(False, False)
         if self.dark.get():
             win.configure(background=DARK["bg"])
         box = ttk.Frame(win, padding=18)
         box.pack(fill="both", expand=True)
-        movie = self.job["title"] if self.job else ""
+        movie = movie or (self.job["title"] if self.job else "")
         if unresolved:
             headline = f"“{info['word']}” somewhere near {info['time'][:8]}"
             explanation = "The subtitles have this word, but Whisper did not hear it, so nothing is muted yet."
@@ -1371,6 +1440,8 @@ class App(ttk.Frame):
         else:
             said = {"mute": "muted", "leave": "left in", "auto": "three listens decide this one and the rest"}[reply]
             self.write(f"    Conflict {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
+        if self.reviewing:
+            return self.save_answer(reply)
         self.status.set("Working...")
         if self.proc:
             try:
@@ -1378,6 +1449,67 @@ class App(ttk.Frame):
                 self.proc.stdin.flush()
             except OSError:
                 pass  # the run ended meanwhile
+
+    # ------------------------------------------------------------ a batch's question round (see LATER_TIP)
+
+    def start_review(self):
+        """Every movie has been listened to: all their open questions, one after another."""
+        self.questions = []
+        for j in self.later:
+            data = read_review(j["review"]) if j.get("listened") else None
+            if data:
+                self.questions += [(j, part, info) for part, info in open_questions(data)]
+        self.question_n, self.question_total = 0, len(self.questions)
+        if not self.questions:
+            return self.write_round()
+        movies = len({id(q[0]) for q in self.questions})
+        self.write(f"\n===== {self.question_total} question(s) about {movies} movie(s): waiting for you =====\n")
+        for j in {id(q[0]): q[0] for q in self.questions}.values():
+            self.show_row(j["iid"], "Waiting for your answers")
+        self.set_running(True)
+        self.next_question()
+
+    def next_question(self):
+        job, part, info = self.reviewing = self.questions.pop(0)
+        self.question_n += 1
+        self.ask(info, movie=job["title"], number=(self.question_n, self.question_total))
+
+    def save_answer(self, reply):
+        """Kept in the movie's saved analysis right away: stopping now loses nothing."""
+        job, part, info = self.reviewing
+        data = read_review(job["review"])
+        if data is not None:
+            data["answers"][part][str(info["n"])] = reply
+            profmute.save_review(job["review"], data)
+        if reply == "auto":   # the rest of this movie's questions of this kind are answered by that too
+            gone = [q for q in self.questions if q[0] is job and q[1] == part]
+            self.questions = [q for q in self.questions if q not in gone]
+            self.question_n += len(gone)
+        if not any(q[0] is job for q in self.questions):
+            self.show_row(job["iid"], "Answered")
+        if self.questions:
+            return self.next_question()
+        self.write_round()
+
+    def write_round(self):
+        """The last round: every clean copy, written with the answers."""
+        self.reviewing = None
+        jobs = [dict(j, cmd=j["write_cmd"], round=3) for j in self.later if j.get("listened")]
+        self.later = None
+        if not jobs:
+            return self.batch_done()
+        self.write("\n===== Writing the clean copies =====\n")
+        self.run_jobs(jobs, fresh=False)
+
+    def stop_review(self):
+        """Cancel during the question round: the answers given so far stay saved."""
+        self.close_ask()
+        for j in {id(q[0]): q[0] for q in [self.reviewing] + self.questions}.values():
+            self.show_row(j["iid"], "Waiting for your answers")
+        self.reviewing, self.questions, self.later = None, [], None
+        self.status.set("Stopped. Your answers so far are saved: start the same batch again to carry on.")
+        self.write(f"\n===== {self.status.get()} =====\n")
+        self.set_running(False)
 
     # ------------------------------------------------------------ finishing
 
@@ -1406,22 +1538,37 @@ class App(ttk.Frame):
             outcome, row = "done", "Nothing to mute"
         else:
             outcome, row = "done", f"Done: {self.found} muted"
-        self.results[outcome] += 1
+        listening = job.get("round") == 1
+        if listening and outcome == "done":   # the first round of three: listened to, written later
+            data = read_review(job["review"])
+            job["listened"] = data is not None
+            asks = len(open_questions(data)) if data else 0
+            row = f"Listened: {asks} question(s)" if asks else "Listened: no questions"
+        else:
+            self.results[outcome] += 1
         if batch:
             self.show_row(job["iid"], row)
             if self.jobs and not self.cancelled:
                 return self.next_job()
             for waiting in self.jobs:
                 self.show_row(waiting["iid"], "Not run")
-            r = self.results
-            summary = f"{r['done']} done, {r['failed']} failed, {r['skipped']} skipped" + \
-                      (f", {len(self.jobs)} not run" if self.jobs else "")
-            self.status.set(("Batch cancelled: " if self.cancelled else "Batch finished: ") + summary + ".")
-            self.write(f"\n===== {self.status.get()} =====\n")
-        else:
-            self.status.set({"cancelled": "Cancelled.", "done": "Done.",
-                             "failed": "Something went wrong - see the messages below."}[outcome])
+            if listening and not self.cancelled and self.later:
+                self.jobs, self.job = [], None
+                return self.start_review()
+            return self.batch_done()
+        self.status.set({"cancelled": "Cancelled.", "done": "Done.",
+                         "failed": "Something went wrong - see the messages below."}[outcome])
         self.jobs, self.job = [], None
+        self.set_running(False)
+        threading.Thread(target=self.fetch_models, daemon=True).start()   # a model may have been downloaded just now
+
+    def batch_done(self):
+        r = self.results
+        summary = f"{r['done']} done, {r['failed']} failed, {r['skipped']} skipped" + \
+                  (f", {len(self.jobs)} not run" if self.jobs else "")
+        self.status.set(("Batch cancelled: " if self.cancelled else "Batch finished: ") + summary + ".")
+        self.write(f"\n===== {self.status.get()} =====\n")
+        self.jobs, self.job, self.later = [], None, None
         self.set_running(False)
         threading.Thread(target=self.fetch_models, daemon=True).start()   # a model may have been downloaded just now
 
@@ -1440,6 +1587,8 @@ class App(ttk.Frame):
         self.cancel_btn.configure(state="normal" if running else "disabled")
 
     def cancel(self):
+        if self.reviewing:
+            return self.stop_review()
         if self.proc:
             self.cancelled = True
             self.status.set("Stopping...")

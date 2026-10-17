@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.4.0 - 2026-10-17
+
+### Added
+
+- **A batch you can start and walk away from.** With the new option "Listen to every movie first,
+  then ask me everything at once" (on by default), a batch runs in three rounds:
+  1. every movie is listened to and checked, without asking anything;
+  2. all the questions about all the movies come together, each with its movie's name, its number
+     among all of them and the Play buttons;
+  3. every clean copy is written with your answers, without asking anything.
+
+  Start a big batch at night, answer the questions in the morning, and the writing runs while
+  you are away. Each answer is saved as you give it: stop during the questions, start the same
+  batch again later, and only the unanswered questions come back, without listening again.
+- On the command line: `--review-file` (listen and save the questions, write nothing) and
+  `--from-review` (write the clean copy with the answers added to that file).
+- **Remove everything when uninstalling.** The uninstaller asks, with a box that is unticked
+  unless you tick it, whether to also remove your word list, model lists, settings and logs, and
+  the Whisper models ProfMute downloaded into your user folder.
+
+### Changed
+
+- "Pause and ask me about conflicts" is now "Ask me about conflicts", since with the new option
+  the batch no longer pauses for them.
+
+### Fixed
+
+- **Uninstalling deleted your word list.** It is now kept, with the model lists, your settings
+  and logs, so installing again picks them up (unless you tick "Remove everything").
+- A stretch to mute that lies past the end of the sound (a subtitle line after it, for example)
+  no longer stops the clean copy from being written.
+
 ## 1.3.1 - 2026-10-16
 
 ### Fixed
