@@ -73,7 +73,9 @@ LOG_BESIDE_TIP = ("The log lists every spot that was muted, with its time, plus 
 TIPS = {
     "movie": "The movie to clean. It is only read, never changed.",
     "srt": "Subtitles for this movie (a .srt file). They double-check what Whisper hears, and the clean subtitle "
-           "file is made from them.\n\nLeave empty and ProfMute uses a .srt next to the movie with the same name, "
+           "file is made from them.\n\nUse an accurate one, ideally from the disc or the official release. "
+           "Machine-made subtitles often leave out swears, and every swear Whisper hears that they leave out "
+           "becomes a conflict to decide.\n\nLeave empty and ProfMute uses a .srt next to the movie with the same name, "
            "or else the English subtitles inside the movie file.",
     "out": "Where the clean copy is saved: the movie with the words on your list muted.\n\n"
            "Fills itself in as <movie name>.clean.mkv next to the movie. It is always an .mkv file.",
@@ -168,7 +170,11 @@ BUTTON_TIPS = {
             "that Whisper did hear. Cuts much less, but can miss the word. Use 'Play the spot' first.",
     "leave_unresolved": "Mute nothing for this line. It stays listed under UNRESOLVED in the log.",
     "leave_rest": "Stop asking for this movie. This line and the remaining unresolved ones are left as they are.",
+    "back": "Go back to the question before and answer it again. Nothing is decided until the last question is "
+            "answered, so any answer can still be changed.",
 }
+ANSWER_WORDS = {"mute": "Mute it", "leave": "Leave it", "auto": "Decide the rest automatically", "line": "Mute the whole line",
+                "spot": "Mute the estimated spot"}   # an earlier answer, as shown when going back to it
 
 
 def load_settings():
@@ -1387,6 +1393,8 @@ class App(ttk.Frame):
             plays = [("play", "▶  Play", "clip")]
             choices = [("mute", "Mute it", "mute"), ("leave", "Leave it", "leave")]
             rest = ("auto", "Decide the rest of this movie automatically")
+        if info.get("previous"):   # back at a question answered before
+            facts.append(("You answered", ANSWER_WORDS.get(info["previous"], info["previous"])))
 
         def button(parent, tip, text, command, enabled=True):
             b = ttk.Button(parent, text=text, command=command, state="normal" if enabled else "disabled")
@@ -1407,8 +1415,10 @@ class App(ttk.Frame):
         decide.grid(row=len(facts) + 3, column=0, columnspan=2, sticky="w", pady=(10, 0))
         for tip, text, reply in choices:
             button(decide, tip, text, lambda reply=reply: self.answer(reply)).pack(side="left", padx=(0, 6))
-        button(box, rest[0], rest[1], lambda: self.answer("auto")).grid(
-            row=len(facts) + 4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        bottom = ttk.Frame(box)
+        bottom.grid(row=len(facts) + 4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        button(bottom, rest[0], rest[1], lambda: self.answer("auto")).pack(side="left")
+        button(bottom, "back", "◀  Back", lambda: self.answer("back"), bool(info.get("can_go_back"))).pack(side="right")
         win.protocol("WM_DELETE_WINDOW", lambda: self.answer("auto"))
         self.title_bar(win)
         win.update_idletasks()
@@ -1433,7 +1443,9 @@ class App(ttk.Frame):
     def answer(self, reply):
         info = self.ask_info
         self.close_ask()
-        if info.get("kind") == "unresolved":
+        if reply == "back":
+            self.write("    Back to the question before\n")
+        elif info.get("kind") == "unresolved":
             said = {"line": "whole line muted", "spot": "estimated spot muted", "leave": "left in",
                     "auto": "left in, and so are the rest"}[reply]
             self.write(f"    Unresolved {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
@@ -1441,7 +1453,7 @@ class App(ttk.Frame):
             said = {"mute": "muted", "leave": "left in", "auto": "three listens decide this one and the rest"}[reply]
             self.write(f"    Conflict {info['n']}/{info['of']} at {info['time']} \"{info['word']}\": {said}\n")
         if self.reviewing:
-            return self.save_answer(reply)
+            return self.review_back() if reply == "back" else self.save_answer(reply)
         self.status.set("Working...")
         if self.proc:
             try:
@@ -1460,6 +1472,7 @@ class App(ttk.Frame):
             if data:
                 self.questions += [(j, part, info) for part, info in open_questions(data)]
         self.question_n, self.question_total = 0, len(self.questions)
+        self.review_history, self.review_previous = [], {}   # answered: (question, answer, answered with it, number)
         if not self.questions:
             return self.write_round()
         movies = len({id(q[0]) for q in self.questions})
@@ -1472,6 +1485,7 @@ class App(ttk.Frame):
     def next_question(self):
         job, part, info = self.reviewing = self.questions.pop(0)
         self.question_n += 1
+        info = dict(info, can_go_back=bool(self.review_history), previous=self.review_previous.get((id(job), part, info["n"])))
         self.ask(info, movie=job["title"], number=(self.question_n, self.question_total))
 
     def save_answer(self, reply):
@@ -1481,15 +1495,31 @@ class App(ttk.Frame):
         if data is not None:
             data["answers"][part][str(info["n"])] = reply
             profmute.save_review(job["review"], data)
+        gone = []
         if reply == "auto":   # the rest of this movie's questions of this kind are answered by that too
             gone = [q for q in self.questions if q[0] is job and q[1] == part]
             self.questions = [q for q in self.questions if q not in gone]
             self.question_n += len(gone)
+        self.review_history.append((self.reviewing, reply, gone, self.question_n - len(gone)))
         if not any(q[0] is job for q in self.questions):
             self.show_row(job["iid"], "Answered")
         if self.questions:
             return self.next_question()
         self.write_round()
+
+    def review_back(self):
+        """Back to the question answered last: its saved answer is taken back, and so are the ones it answered
+        along with it ('decide the rest'), which come back in turn."""
+        (job, part, info), reply, gone, number = self.review_history.pop()
+        data = read_review(job["review"])
+        if data is not None:
+            data["answers"][part].pop(str(info["n"]), None)
+            profmute.save_review(job["review"], data)
+        self.review_previous[(id(job), part, info["n"])] = reply
+        self.questions = [(job, part, info)] + gone + [self.reviewing] + self.questions
+        self.question_n = number - 1
+        self.show_row(job["iid"], "Waiting for your answers")
+        self.next_question()
 
     def write_round(self):
         """The last round: every clean copy, written with the answers."""

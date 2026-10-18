@@ -26,7 +26,7 @@ import argparse, bisect, gc, hashlib, json, os, re, secrets, shutil, subprocess,
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -76,6 +76,27 @@ dick
 dicks
 douche*
 blowjob*
+handjob*
+rimjob*
+cum
+cums
+cumming
+cummed
+cumshot*
+jizz*
+cuck
+cucks
+cucked
+cucking
+cuckold*
+tits
+titties
+titty
+boner
+boners
+dildo*
+hardon*
+deepthroat*
 
 [phrases]
 # Several words on a line: muted from the first word to the last, when said together.
@@ -85,6 +106,17 @@ sons of bitches
 god damn*
 jesus christ
 mother fuck*
+hand job*
+rim job*
+jerk off
+jerks off
+jerked off
+jerking off
+jack off
+jacks off
+jacked off
+jacking off
+deep throat*
 
 [censored]
 # Advanced. Speech-to-text sometimes writes a swear word bleeped, like f*** or s**t.
@@ -691,6 +723,9 @@ def use_words(path=None):
     return RULES
 
 
+INNOCENT_BEFORE = {"cum": ("laude",)}   # a word on the list that is innocent before these: "summa cum laude"
+
+
 def match_len(toks, i, gap_ok=None):
     """How many tokens starting at i make up one profanity hit (0 = none). toks = [(raw, tok), ...]"""
     for ph in RULES.phrases:
@@ -700,6 +735,8 @@ def match_len(toks, i, gap_ok=None):
            and (gap_ok is None or all(gap_ok(i + k) for k in range(n - 1))):
             return n
     raw, tok = toks[i]
+    if tok in INNOCENT_BEFORE and i + 1 < len(toks) and toks[i + 1][1] in INNOCENT_BEFORE[tok]:
+        return 0
     return 1 if RULES.words.fullmatch(tok) or RULES.censored.fullmatch(raw) else 0
 
 
@@ -1130,8 +1167,10 @@ def ask_user(info):
 
     A conflict (info['kind'] == 'conflict'): -> 'mute', 'leave', or 'auto' (three listens decide this and the rest)
     An unresolved word ('unresolved'):       -> 'line', 'spot', 'leave', or 'auto' (leave this and the rest)
+    And, when info['can_go_back']: 'back' (to the question before, to answer it again)
     """
     unresolved = info.get("kind") == "unresolved"
+    back = bool(info.get("can_go_back"))
     if sys.stdin is not None and sys.stdin.isatty():
         if unresolved:
             print(f"\nUNRESOLVED {info['n']} of {info['of']} at {info['time']}: the subtitles have \"{info['word']}\", "
@@ -1140,21 +1179,48 @@ def ask_user(info):
             print(f"    Whisper heard: {info['heard'] or '(nothing)'}")
             print(f"    Best guess at the spot: {info['spot']}  ({info['spot_seconds']:.1f} s)")
             keys, question = {"w": "line", "s": "spot", "l": "leave", "r": "auto"}, \
-                "    mute the [w]hole line, only the estimated [s]pot, [l]eave it, or leave this and the [r]est? "
+                "    mute the [w]hole line, only the estimated [s]pot, [l]eave it, or leave this and the [r]est"
         else:
             print(f"\nCONFLICT {info['n']} of {info['of']} at {info['time']}: Whisper heard \"{info['word']}\", "
                   f"the subtitles do not have it.")
             print(f"    Whisper:   {info['before']} >>{info['word']}<< {info['after']}")
             print(f"    Subtitles: {info['subtitles'] or '(nothing at that moment)'}")
             keys, question = {"m": "mute", "l": "leave", "r": "auto"}, \
-                "    [m]ute it, [l]eave it, or let three listens decide this and the [r]est? "
+                "    [m]ute it, [l]eave it, or let three listens decide this and the [r]est"
+        if info.get("previous"):
+            print(f"    You answered before: {info['previous']}")
+        if back:
+            keys["b"], question = "back", question + ", or go [b]ack to the one before"
+        question += "? "
         while True:
             answer = input(question).strip().lower()[:1]
             if answer in keys:
                 return keys[answer]
     print(ASK + json.dumps(info), flush=True)
     answer = sys.stdin.readline().strip() if sys.stdin is not None else ""
-    return answer if answer in (("line", "spot", "leave") if unresolved else ("mute", "leave")) else "auto"
+    allowed = (("line", "spot", "leave") if unresolved else ("mute", "leave")) + (("back",) if back else ())
+    return answer if answer in allowed else "auto"
+
+
+def ask_all(questions):
+    """Ask the questions one after another, with a way back: questions = [("conflicts" | "unresolved", info), ...].
+    'auto' answers the rest of its kind too; 'back' reopens the question answered before (showing that answer).
+    -> {"conflicts": {n: answer}, "unresolved": {n: answer}}"""
+    answers, asked, i = {"conflicts": {}, "unresolved": {}}, [], 0
+    while i < len(questions):
+        part, info = questions[i]
+        answer = ask_user(dict(info, can_go_back=bool(asked), previous=answers[part].get(info["n"])))
+        if answer == "back" and asked:
+            i = asked.pop()
+            continue
+        answers[part][info["n"]] = answer
+        asked.append(i)
+        i += 1
+        if answer == "auto":   # the rest of this kind is decided too: on to the other kind, if any
+            while i < len(questions) and questions[i][0] == part:
+                answers[part].pop(questions[i][1]["n"], None)
+                i += 1
+    return answers
 
 
 def save_clip(path, samples, start, end):
@@ -1259,12 +1325,8 @@ def decide_unresolved(samples, words, cues, unresolved):
     window = sys.stdin is None or not sys.stdin.isatty()
     clips = tempfile.mkdtemp(prefix="profmute-") if window else None
     try:
-        questions, answers = unresolved_questions(samples, words, cues, unresolved, clips), {}
-        for q in questions:
-            answers[q["info"]["n"]] = answer = ask_user(q["info"])
-            if answer == "auto":
-                break
-        return apply_unresolved(questions, answers)
+        questions = unresolved_questions(samples, words, cues, unresolved, clips)
+        return apply_unresolved(questions, ask_all([("unresolved", q["info"]) for q in questions])["unresolved"])
     finally:
         if clips:
             shutil.rmtree(clips, ignore_errors=True)
@@ -1322,7 +1384,7 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry, c
             votes[i] = vote(model, samples, hits[i], hits[:i] + hits[i + 1:])
         return votes[i]
 
-    need = [i for i in range(len(hits)) if confirm or (is_conflict(i) and conflicts in ("auto", "later"))]
+    need = [i for i in range(len(hits)) if confirm or (is_conflict(i) and conflicts in ("auto", "later", "ask"))]
     for n, i in enumerate(need, 1):
         print(f"\r    listening again {n}/{len(need)}", end="", flush=True)
         get_vote(i)
@@ -1360,21 +1422,20 @@ def settle(model, samples, hits, words, cues, backed, confirm, conflicts, dry, c
                     "after": after if len(after) <= 80 else after[:80].rpartition(" ")[0] + " ...",
                     "subtitles": "  /  ".join(flat(c[2]) for c in cues if c[0] < e + 3 and c[1] > s - 3),
                     "listens": f"heard in {heard} listens" if heard else None, "clip": None}
-            if later or sys.stdin is None or not sys.stdin.isatty():  # the window can play it: a few seconds around it
+            if clips_dir if later else sys.stdin is None or not sys.stdin.isatty():   # the window can play a few seconds
                 clips = clips_dir if later else clips or tempfile.mkdtemp(prefix="profmute-")
                 info["clip"] = save_clip(os.path.join(clips, f"conflict{info['n']}.wav"), samples,
                                          where[0] - 3, where[1] + 3)
-            if later:
-                pending.append({"info": info, "where": list(where), "s": s, "e": e, "text": text, "vote": get_vote(i)})
-                stats["conflict"] += 1
-                continue
-            answer = ask_user(info)
-            if answer == "auto":
-                asking = False
+            pending.append({"info": info, "where": list(where), "s": s, "e": e, "text": text, "vote": get_vote(i)})
+            stats["conflict"] += 1
+            continue
         spans, line = conflict_outcome(answer, where, s, e, text, lambda i=i: get_vote(i))
         mute += spans
         report.append(line)
         stats["conflict"] += 1
+    if asking and pending:   # asked now, all of them, with a way back: the answers count once all are given
+        more, lines = resolve_conflicts(pending, ask_all([("conflicts", p["info"]) for p in pending])["conflicts"])
+        mute, report, pending = mute + more, report + lines, []
     if clips and not later:
         shutil.rmtree(clips, ignore_errors=True)
     stats.update(v[0] for v in votes.values())
@@ -1496,7 +1557,15 @@ def analyse(a, src, out, out_srt, model_name, rules, later, clips):
             notes.append(f"Subtitles: {srt_name}, {sync}. {relistened} line(s) re-listened to, "
                          f"{len(hits) - before} more hit(s) found, {len(unresolved)} unresolved.")
 
-    conflicts = "later" if later and a.conflicts == "ask" else a.conflicts
+    # questions to ask now (not later) are collected first and asked together, conflicts then unresolved words,
+    # with a way back through all of them; their answers count once every one is given
+    now = not later and not a.dry
+    window = sys.stdin is None or not sys.stdin.isatty()
+    ask_conflicts = a.conflicts == "ask" and not a.dry
+    ask_unresolved = bool(unresolved) and a.unresolved == "ask" and not a.dry
+    if now and (ask_conflicts or ask_unresolved) and window:
+        clips = tempfile.mkdtemp(prefix="profmute-")
+    conflicts = "later" if ask_conflicts else a.conflicts
     hits, conflict_lines, stats, pending = settle(model, samples, hits, words, cues, backed, a.confirm, conflicts,
                                                   a.dry, clips)
     if a.confirm:
@@ -1506,14 +1575,20 @@ def analyse(a, src, out, out_srt, model_name, rules, later, clips):
     if conflict_lines or pending:
         print(f"    {len(conflict_lines) + len(pending)} conflict(s): heard by Whisper, not in the subtitles.")
     decided, questions = {}, []
-    if unresolved and a.unresolved == "ask":
-        if a.dry:
-            decided = {n: "would ask you (preview)" for n in range(len(unresolved))}
-        elif later:
-            questions = unresolved_questions(samples, words, cues, unresolved, clips)
-        else:
-            more, decided = decide_unresolved(samples, words, cues, unresolved)
-            hits = sorted(hits + more)
+    if unresolved and a.unresolved == "ask" and a.dry:
+        decided = {n: "would ask you (preview)" for n in range(len(unresolved))}
+    elif ask_unresolved:
+        questions = unresolved_questions(samples, words, cues, unresolved, clips)
+    if now and (pending or questions):
+        try:
+            answers = ask_all([("conflicts", p["info"]) for p in pending] + [("unresolved", q["info"]) for q in questions])
+        finally:
+            if clips:
+                shutil.rmtree(clips, ignore_errors=True)
+        more, resolved = resolve_conflicts(pending, answers["conflicts"])
+        unmute, decided = apply_unresolved(questions, answers["unresolved"])
+        hits, conflict_lines = sorted(hits + more + unmute), sorted(conflict_lines + resolved)
+        pending, questions = [], []
     state = dict(words=[list(w) for w in words], cues=[list(c) for c in cues], usable=bool(usable_cues), notes=notes,
                  hits=[list(h) for h in hits], conflict_lines=conflict_lines, unresolved=[list(u) for u in unresolved],
                  decided=decided, pending=pending, questions=questions, out_srt=str(out_srt), model=model_name)

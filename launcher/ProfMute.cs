@@ -19,7 +19,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("ProfMute")]
 [assembly: AssemblyProduct("ProfMute")]
 [assembly: AssemblyDescription("Mutes profanity in a movie's audio track")]
-[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
 
 static class Launcher
 {

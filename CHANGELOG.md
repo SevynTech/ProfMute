@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.1 - 2026-10-18
+
+### Added
+
+- **A Back button for the questions.** Answered a conflict or an unresolved word with the wrong
+  button? **Back** returns to the question before, showing what you answered, so you can answer
+  it again. It works through the conflicts and the unresolved words alike, during a movie and in
+  a batch's question round. A movie's answers now count once its last question is answered, so
+  any of them can still be changed until then.
+
+### Changed
+
+- **More sexual words in the word list:** cum (cums, cumming, cummed, cumshot), jizz, cuck (cucks,
+  cucked, cucking, cuckold), tits, titties, titty, handjob, rimjob, boner, dildo, hard-on and
+  deepthroat, and the phrases hand job, rim job, jerk off, jack off and deep throat (with their
+  -s, -ed and -ing forms). Written so innocent words stay alone: cumulative, cumin, cucumber,
+  cuckoo, title, "too hard on him" and "summa cum laude" are not muted. An existing `words.txt` is
+  not changed: add the ones you want under `[words]` and `[phrases]` yourself, or delete
+  `words.txt` (ProfMute then writes the new default list).
+- The README has a new section, **Use good subtitles**: why an accurate subtitle file matters,
+  how machine-made subtitles cause a flood of conflicts, where to get good ones and what to do
+  with a poor one. The subtitle file's mouse-over in the window says so too.
+
 ## 1.4.0 - 2026-10-17
 
 ### Added
