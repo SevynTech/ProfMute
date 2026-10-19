@@ -46,7 +46,8 @@ ASK_TIP = ("A conflict is a word Whisper heard that the subtitles do not have.\n
 TRANSCRIPT_TIP = ("On: before a clean copy is written, you get the movie's whole transcript to check, as the clean copy "
                   "will have it: every muted word shows as f*****, so a swear you can still read was missed.\n\n"
                   "Click a word to mute it (or drag across several and press Mute selected), click a muted word to "
-                  "keep it in this movie, search for any word, and click a time to hear that line.\n\n"
+                  "keep it in this movie, search for any word, and click a time to hear that line. With \"Speak a "
+                  "clean word\", right-click a word to choose what is said in its place.\n\n"
                   "In a batch the transcripts come after the questions, before the clean copies are written, so the "
                   "batch can still run while you are away.")
 LATER_TIP = ("On: a batch runs in three rounds, so it can run while you are away:\n"
@@ -408,7 +409,8 @@ class Transcript:
     """The last check before a clean copy is written: the movie's dialogue as Whisper heard it, as the clean copy
     will have it. A muted word shows masked ("f******"), so a swear that can be read plainly is one that was missed.
     Click a word to mute it, or a muted one to keep it; drag across several words and press "Mute selected" for a
-    phrase; search; click a time to hear that line from the movie. done(data) gets the saved analysis back with
+    phrase; search; click a time to hear that line from the movie. With "Speak a clean word", right-click a word
+    (or words dragged across) to choose what is said in its place. done(data) gets the saved analysis back with
     the changes ("picks") in it."""
 
     def __init__(self, app, job, data, done):
@@ -437,6 +439,13 @@ class Transcript:
             if covered:
                 self.says.append([covered, swear, word, yours.get((round(s, 2), round(e, 2))), s, e])
         self.say_of = {i: n for n, g in enumerate(self.says) for i in g[0]}
+        # words that are not swears, muted by you with a word to say in their place: (word indexes) -> your word
+        self.instead = {}
+        for m in picks.get("mute", []):
+            covered = tuple(sorted(under([m[:2]])))
+            if len(m) > 3 and m[3] and covered:
+                self.instead[covered] = m[3]
+        self.speaking = bool(app.speak.get() and app.separate.get())
         self.lines = transcript_lines(self.words)
         self.first = {line[0] for line in self.lines}
         self.found, self.current, self.word_win = [], -1, None
@@ -455,8 +464,9 @@ class Transcript:
             "The dialogue as the clean copy will have it: muted words show as f*****, so a swear you can read "
             "plainly here was missed. Click a word to mute it, or click a muted word to keep it in this movie. "
             "For several words, drag across them and press Mute selected. Click a time to hear that line." +
-            (" Purple words will be said in place of a swear: right-click one to choose another word, or to just "
-             "mute it." if self.says else ""))).pack(anchor="w", pady=(2, 8))
+            (" Purple words will be said in place of the words heard: right-click one to choose another word, or "
+             "to just mute it. Right-click any other word, or words you dragged across, to say something else "
+             "in their place." if self.speaking else ""))).pack(anchor="w", pady=(2, 8))
 
         find = ttk.Frame(box)
         find.pack(fill="x", pady=(0, 6))
@@ -506,7 +516,8 @@ class Transcript:
         legend = ttk.Frame(bottom)
         legend.pack(fill="x")
         for label, tag in (("muted by the word list or your answers", "listed"), ("muted by you", "picked"),
-                           ("kept by you", "kept")) + ((("said instead (right-click to change)", "spoken"),) if self.says else ()):
+                           ("kept by you", "kept")) + ((("said instead (right-click to change)", "spoken"),)
+                                                       if self.says or self.speaking else ()):
             sample = tk.Label(legend, text="■ " + label, foreground=text.tag_cget(tag, "foreground"),
                               background=DARK["bg"] if dark else app.light_bg)
             sample.pack(side="left", padx=(0, 14))
@@ -531,10 +542,19 @@ class Transcript:
         """A swear will be said instead only while all its words are still muted as the list or your answers had it."""
         return all(k in self.listed and k not in self.kept and k not in self.picked for k in g[0])
 
+    def mine(self, i):
+        """The words of yours that word i is in (a word to say in place of words that are not swears), or None."""
+        return next((k for k in self.instead if i in k), None)
+
     def look(self, i):
         tag = "picked" if i in self.picked else "kept" if i in self.kept else "listed" if i in self.listed else None
         word = self.words[i][2]
         shown = mask(word) if self.muted(i) else word
+        k = self.mine(i)
+        if k:
+            if i != k[0]:
+                return HIDDEN, "spoken"
+            return self.instead[k] + re.search(r"[^\w']*$", self.words[k[-1]][2]).group(), "spoken"
         g = self.says[self.say_of[i]] if i in self.say_of else None
         if g and self.spoken(g) and (g[2] if g[3] is None else g[3]):
             if i != g[0][0]:
@@ -577,14 +597,14 @@ class Transcript:
 
     def refresh(self, i):
         """Show word i again, with the rest of its swear when a clean word stands for it."""
-        for k in (self.says[self.say_of[i]][0] if i in self.say_of else [i]):
+        for k in (self.says[self.say_of[i]][0] if i in self.say_of else self.mine(i) or [i]):
             self.redraw(k)
 
     def tell(self):
         muted = sum(self.muted(i) for i in range(len(self.words)))
-        chosen = sum(g[3] is not None for g in self.says)
+        chosen = sum(g[3] is not None for g in self.says) + len(self.instead)
         self.summary.set(f"{muted} word(s) muted   ·   you: {len(self.picked)} muted, {len(self.kept)} kept"
-                         + (f", {chosen} word(s) chosen" if self.says else ""))
+                         + (f", {chosen} word(s) chosen" if self.says or self.speaking else ""))
 
     # ---- changing it
     def word_at(self, index):
@@ -602,6 +622,10 @@ class Transcript:
 
     def toggle(self, i):
         """One word: mute it, or keep it if it is muted; again to undo."""
+        k = self.mine(i)
+        if k:                             # a word you chose to say: back to the words as heard
+            self.unsay(k)
+            return self.tell()
         if i in self.picked:
             self.picked.discard(i)
         elif i in self.kept:
@@ -630,13 +654,73 @@ class Transcript:
         self.text.tag_remove("sel", "1.0", "end")
         self.tell()
 
+    def unsay(self, k):
+        """Your word for words k goes: they are heard again."""
+        del self.instead[k]
+        self.picked.difference_update(k)
+        for i in k:
+            self.redraw(i)
+
+    def selected(self):
+        """The words dragged across, or []."""
+        sel = self.text.tag_ranges("sel")
+        if not sel:
+            return []
+        start, end = sel
+        return [i for i in range(len(self.words)) if self.text.tag_ranges(f"w{i}")
+                and self.text.compare(self.text.tag_ranges(f"w{i}")[1], ">", start)
+                and self.text.compare(self.text.tag_ranges(f"w{i}")[0], "<", end)]
+
     def right_clicked(self, event):
         i = self.word_at(f"@{event.x},{event.y}")
-        if i is not None and i in self.say_of and self.spoken(self.says[self.say_of[i]]):
-            self.choose_word(self.says[self.say_of[i]])
+        if i is None:
+            return
+        if i in self.say_of and self.spoken(self.says[self.say_of[i]]):
+            return self.choose_word(self.says[self.say_of[i]])
+        if self.mine(i):
+            return self.say_instead(self.mine(i))
+        chosen = self.selected()
+        if i not in chosen:               # right-clicked outside the dragged words: just this word
+            chosen = [i]
+        chosen = [k for k in chosen if not (k in self.listed and k not in self.kept)]   # muted words stay as they are
+        if not chosen or any(self.mine(k) or k in self.say_of for k in chosen):
+            return
+        if not self.speaking:
+            return messagebox.showinfo("ProfMute", "To say another word here, tick \"Speak a clean word in the "
+                                       "actor's voice\" before the clean copy is written.\n\nTo mute the word, "
+                                       "left-click it.", parent=self.win)
+        if chosen != list(range(chosen[0], chosen[-1] + 1)):
+            return messagebox.showinfo("ProfMute", "Drag across words that follow each other.", parent=self.win)
+        self.say_instead(tuple(chosen))
 
-    def choose_word(self, g):
-        """What to say instead of one swear: your word, the AI's, or nothing (just mute it)."""
+    def say_instead(self, k):
+        """What to say in place of words k (not swears): your word, or nothing (just mute them)."""
+        heard = " ".join(self.words[i][2] for i in k).strip(",.?!")
+        before = self.instead.get(k)
+        self.word_dialog(f"Instead of “{heard}”, say:", "Said in the actor's voice, in the actor's sentence. "
+                         "If it does not come out right, the words are only muted.", before or "", [
+                             ("Use this word", None, "It is said in the actor's voice in place of these words."),
+                             ("Just mute it", "", "No word is said here: the words are only muted."),
+                         ] + ([("Don't change it", False, "Back to the words as heard: nothing is muted.")] if before else []),
+                         lambda choice: self.set_instead(k, choice))
+
+    def set_instead(self, k, choice):
+        if choice is False:
+            self.unsay(k)
+        else:
+            if k in self.instead:
+                del self.instead[k]
+            if choice:
+                self.instead[k] = choice
+            self.picked.update(k)
+            self.text.tag_remove("sel", "1.0", "end")
+            for i in k:
+                self.redraw(i)
+        self.tell()
+
+    def word_dialog(self, title, hint, start, buttons, done):
+        """A small window to type a word. buttons = [(label, choice, tip)]; choice None = the typed word, which
+        must not be on the word list. done(choice) on any button but Cancel."""
         dark = self.app.dark.get()
         win = tk.Toplevel(self.win)
         win.title("ProfMute - what to say instead")
@@ -646,20 +730,17 @@ class Transcript:
             win.configure(background=DARK["bg"])
         box = ttk.Frame(win, padding=16)
         box.pack(fill="both", expand=True)
-        ttk.Label(box, text=f"Instead of “{g[1].strip(',.?!')}”, say:", style="Big.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(box, style="Hint.TLabel", text=f"The AI chose “{g[2]}”." if g[2] else "").grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
-        word = tk.StringVar(value=g[3] if g[3] else g[2])
+        ttk.Label(box, text=title, style="Big.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(box, style="Hint.TLabel", text=hint, wraplength=420).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
+        word = tk.StringVar(value=start)
         entry = ttk.Entry(box, textvariable=word, width=36)
         entry.grid(row=2, column=0, columnspan=4, sticky="ew")
         problem = tk.StringVar()
         ttk.Label(box, textvariable=problem, foreground="#dc2626").grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        def done(choice):
-            g[3] = None if choice == g[2] else choice
+        def finish(choice):
             win.destroy()
-            self.refresh(g[0][0])
-            self.tell()
+            done(choice)
 
         def use():
             said = " ".join(word.get().split())
@@ -671,14 +752,12 @@ class Transcript:
                 profmute.RULES = profmute.parse_words(profmute.DEFAULT_WORDS, "built-in list")
             if profmute.find_hits([(n, n + 0.5, w, *profmute.norm(w)) for n, w in enumerate(said.split())]):
                 return problem.set("That is on your word list: it would be muted again.")
-            done(said)
-        buttons = ttk.Frame(box)
-        buttons.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
-        for text, command, tip in (("Use this word", use, "It is said in the actor's voice in place of the swear."),
-                                   ("Just mute it", lambda: done(""), "No word is said here: the swear is only muted."),
-                                   ("Use the AI's word", lambda: done(g[2]), "Back to the word the AI chose."),
-                                   ("Cancel", win.destroy, "Change nothing.")):
-            b = ttk.Button(buttons, text=text, command=command)
+            finish(said)
+        row = ttk.Frame(box)
+        row.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        for text, choice, tip in buttons + [("Cancel", "cancel", "Change nothing.")]:
+            command = use if choice is None else win.destroy if choice == "cancel" else lambda c=choice: finish(c)
+            b = ttk.Button(row, text=text, command=command)
             b.pack(side="left", padx=(0, 6))
             Tooltip(b, tip)
         entry.bind("<Return>", lambda e: use())
@@ -691,6 +770,18 @@ class Transcript:
         entry.focus_set()
         entry.select_range(0, "end")
         self.word_win = win
+
+    def choose_word(self, g):
+        """What to say instead of one swear: your word, the AI's, or nothing (just mute it)."""
+        def done(choice):
+            g[3] = None if choice == g[2] else choice
+            self.refresh(g[0][0])
+            self.tell()
+        self.word_dialog(f"Instead of “{g[1].strip(',.?!')}”, say:", f"The AI chose “{g[2]}”." if g[2] else "",
+                         g[3] if g[3] else g[2], [
+                             ("Use this word", None, "It is said in the actor's voice in place of the swear."),
+                             ("Just mute it", "", "No word is said here: the swear is only muted."),
+                         ] + ([("Use the AI's word", g[2], "Back to the word the AI chose.")] if g[2] else []), done)
 
     # ---- finding
     def search(self):
@@ -750,16 +841,20 @@ class Transcript:
 
     # ---- done
     def picks(self):
-        """The changes, as times: picked words that follow each other become one phrase."""
+        """The changes, as times: picked words that follow each other become one phrase; words you chose a word to
+        say for are their own phrase, with that word fourth."""
         mute, run = [], []
-        for i in sorted(self.picked):
+        said = {i for k in self.instead for i in k}
+        for i in sorted(self.picked - said):
             if run and (i != run[-1] + 1 or self.words[i][0] - self.words[run[-1]][1] > 0.6):
                 mute.append(run)
                 run = []
             run.append(i)
         if run:
             mute.append(run)
-        return {"mute": [[self.words[r[0]][0], self.words[r[-1]][1], " ".join(self.words[i][2] for i in r)] for r in mute],
+        return {"mute": [[self.words[r[0]][0], self.words[r[-1]][1], " ".join(self.words[i][2] for i in r)] for r in mute]
+                        + [[self.words[k[0]][0], self.words[k[-1]][1], " ".join(self.words[i][2] for i in k), w]
+                           for k, w in sorted(self.instead.items())],
                 "keep": [[self.words[i][0], self.words[i][1], self.words[i][2]] for i in sorted(self.kept)],
                 "say": [[g[4], g[5], g[1], g[3]] for g in self.says if g[3] is not None]}
 

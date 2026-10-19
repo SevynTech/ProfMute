@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.5.1 - 2026-10-19
+
+### Added
+
+- **Say another word in place of any word.** With "Speak a clean word", right-click any word in the
+  transcript that is not muted ("Oh, God." becomes "Oh, gosh."), or drag across several words and
+  right-click them, and type what is said in their place. Before, right-click worked only on the
+  swears the AI had chosen a word for; a word you muted yourself was only muted. Your word shows in
+  purple and goes through the same checks as the AI's: a shout, or a word that does not come out
+  clearly, is muted instead. Click it to undo; right-click it to change it, to just mute it, or to
+  leave the words as they were. The log lists it under `TRANSCRIPT` and `SPOKEN` ("your word"), and
+  the clean subtitles show it where they have the same words. Without "Speak a clean word",
+  right-clicking a word says how to turn it on, instead of doing nothing.
+
 ## 1.5.0 - 2026-10-19
 
 ### Added

@@ -193,7 +193,8 @@ How it works, for each sentence with a swear:
    "jerk" for an insult. It never picks made-up sound-alikes like "fudge". Words you set yourself in
    the word list's `[replacements]` section (see [Word list](#word-list)) always come first, and
    with [Reviewing the transcript](#reviewing-the-transcript) you can see every chosen word before
-   anything is written and change any of them. (When a movie is listened to first and written later,
+   anything is written and change any of them, or have any other word or phrase replaced with one
+   of yours ("Oh, God." becomes "Oh, gosh."). (When a movie is listened to first and written later,
    as with the transcript review or a batch's three rounds, the words are chosen while listening.)
 2. **Saying it.** The voice is separated from the music, and dots.tts, an AI speech model, says the
    sentence again with the clean word, copying the actor's voice and delivery. Only the swear is cut
@@ -278,6 +279,11 @@ will have it, line by line with the time each line starts:
   back to the AI's word. Your word still goes through the same checks as the AI's: if the actor
   shouted, or the spoken word does not come out clearly, that spot is muted instead (the log's
   `SPOKEN` part says so).
+- **With "Speak a clean word"**, you can also **right-click any other word** ("Oh, God." becomes
+  "Oh, gosh."), or drag across several words and right-click them, to type what is said in their
+  place. Your word shows in purple and goes through the same checks. Click it to undo, or
+  right-click it to change it, to just mute it, or to leave the words as they were. Where the
+  subtitles have the same words, the clean subtitles show yours.
 - **Done** saves your changes. The clean copy and the clean subtitles follow them, and the log lists
   them under `TRANSCRIPT`.
 
