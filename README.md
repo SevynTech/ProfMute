@@ -340,6 +340,10 @@ son of a bitch*     several words, muted from the first to the last
 motherfucker* = son of a gun     your own clean word, for "Speak a clean word"
 ```
 
+A hyphenated word counts as the words it is made of, the way Whisper hears it: `ass` mutes the
+"ass" in "fat-ass" and leaves "fat" (the clean subtitles say "fat mouth"). A word on the list as a
+whole goes as a whole: with `dumbass` listed, "dumb-ass" is removed entirely from the subtitles.
+
 Capital letters do not matter, and lines starting with `#` are notes. If a line cannot be
 understood, ProfMute says which line and does not start.
 

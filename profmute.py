@@ -26,7 +26,7 @@ import argparse, bisect, gc, hashlib, json, os, re, secrets, shutil, subprocess,
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -725,7 +725,7 @@ def use_words(path=None):
     return RULES
 
 
-INNOCENT_BEFORE = {"cum": ("laude",)}   # a word on the list that is innocent before these: "summa cum laude"
+INNOCENT_BEFORE = {"cum": ("laude",), "cock": ("a doodle",)}   # innocent before these: "summa cum laude", "cock-a-doodle-doo"
 
 
 def match_len(toks, i, gap_ok=None):
@@ -737,7 +737,8 @@ def match_len(toks, i, gap_ok=None):
            and (gap_ok is None or all(gap_ok(i + k) for k in range(n - 1))):
             return n
     raw, tok = toks[i]
-    if tok in INNOCENT_BEFORE and i + 1 < len(toks) and toks[i + 1][1] in INNOCENT_BEFORE[tok]:
+    after = [t[1] for t in toks[i + 1:i + 4]]
+    if tok in INNOCENT_BEFORE and any(after[:len(s.split())] == s.split() for s in INNOCENT_BEFORE[tok]):
         return 0
     return 1 if RULES.words.fullmatch(tok) or RULES.censored.fullmatch(raw) else 0
 
@@ -897,13 +898,36 @@ def flat(text):
     return " ".join(TAGS.sub("", text).split())
 
 
+class Glued(str):
+    """A piece of a hyphenated subtitle word, after the first: written straight after the piece before it."""
+
+
+HYPHEN = re.compile(r"(?<=[A-Za-z*])-(?=[A-Za-z*])")
+
+
+def split_hyphens(n, piece):
+    """A hyphenated word that is not on the list as a whole but has a word on the list as one of its parts, as
+    pieces of their own: "fat-ass," -> "fat-", "ass," (the hyphen stays with the part before it), as Whisper
+    hears it ("fat", "-ass"). A word on the list as a whole ("fucked-up", "dumb-ass") stays one piece, so it
+    goes as a whole, and so does a bleeped spelling ("f**k-ing")."""
+    lead, body, trail = SPLIT_TAGS.match(piece).groups()
+    parts = HYPHEN.split(body)
+    hit = lambda w: bool(RULES.words.fullmatch(norm(w)[1]) or RULES.censored.fullmatch(norm(w)[0]))
+    if len(parts) < 2 or hit(body) or not any(RULES.words.fullmatch(norm(x)[1]) for x in parts):
+        return [(n, piece)]
+    parts = [x + "-" for x in parts[:-1]] + [parts[-1]]
+    parts[0], parts[-1] = lead + parts[0], parts[-1] + trail
+    return [(n, parts[0])] + [(n, Glued(x)) for x in parts[1:]]
+
+
 def cue_scan(text):
     """Split one subtitle cue into words and find its profanity.
 
     -> (pieces = [(line number, word as written), ...],
         hits   = [(index of first piece, number of pieces, label), ...]; cut-off words get a '...' label)
+    A hyphenated word with a word on the list inside ("fat-ass") is split into pieces (see split_hyphens).
     """
-    pieces = [(n, p) for n, line in enumerate(text.split("\n")) for p in PIECE.findall(line)]
+    pieces = [x for n, line in enumerate(text.split("\n")) for p in PIECE.findall(line) for x in split_hyphens(n, p)]
     toks = [norm(TAGS.sub("", p)) for _, p in pieces]
     hits, i = [], 0
     while i < len(toks):
@@ -951,12 +975,18 @@ def clean_cue(text, spoken=None, keep=(), delete=()):
     swap = {i: (n, spoken[h]) for h, (i, n, _) in hits if h in spoken}
     absorbed = {i + k for i, (n, _) in swap.items() for k in range(1, n)}     # the rest of a swapped phrase
     drop = {i + k for h, (i, n, _) in hits if h not in spoken for k in range(n)}
-    kept = []                # [line number, lead tags, body, trail tags] of the words that stay
+    head = []                # the first piece of the hyphenated word each piece belongs to (itself, mostly)
+    for i, (_, piece) in enumerate(pieces):
+        head.append(head[-1] if isinstance(piece, Glued) and head else i)
+    kept = []                # [line number, lead tags, body, trail tags, piece number] of the words that stay
     carry, capitalize = "", False   # tags/quotes owed to the next kept word; capitalize it?
     for i, (line, piece) in enumerate(pieces):
         lead, body, trail = SPLIT_TAGS.match(piece).groups()
         if i in absorbed:
             continue
+        if i in drop and isinstance(piece, Glued) and kept and head[kept[-1][4]] == head[i] and \
+                not (i + 1 < len(pieces) and isinstance(pieces[i + 1][1], Glued)):
+            kept[-1][2] = kept[-1][2].rstrip("-")         # "fat-ass" -> "fat": the hyphen goes with the last part
         if i in swap:
             n, clean = swap[i]
             opening = re.match(r"[^\w*]*", body).group()
@@ -972,7 +1002,7 @@ def clean_cue(text, spoken=None, keep=(), delete=()):
                 body = body[:1].upper() + body[1:]
             if any(c.isalnum() for c in body):
                 capitalize = False
-            kept.append([line, carry + lead, body, trail])
+            kept.append([line, carry + lead, body, trail, i])
             carry = ""
             continue
         prev = next((k for k in reversed(kept) if any(c.isalnum() for c in k[2])), None)
@@ -993,9 +1023,14 @@ def clean_cue(text, spoken=None, keep=(), delete=()):
             prev[3] += lead + trail
     if carry and kept:
         kept[-1][3] += carry
-    lines = {}
-    for line, lead, body, trail in kept:
-        lines.setdefault(line, []).append(lead + body + trail)
+    lines, last = {}, None
+    for line, lead, body, trail, i in kept:
+        words = lines.setdefault(line, [])
+        if isinstance(pieces[i][1], Glued) and last is not None and head[last] == head[i] and words:
+            words[-1] += lead + body + trail          # the rest of a hyphenated word ("Un-" + "believable")
+        else:
+            words.append(lead + body + trail)
+        last = i
     out = [" ".join(words) for _, words in sorted(lines.items())]
     out = [ln for ln in out if any(c.isalnum() for c in TAGS.sub("", ln))]
     return "\n".join(out), len(hits) - len(swap)

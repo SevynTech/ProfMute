@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.5.2 - 2026-10-19
+
+### Fixed
+
+- **A swear inside a hyphenated word stayed in the clean subtitles** ("He ran his fat-ass mouth").
+  Whisper hears such a word as its parts ("fat", "-ass") and muted the swear, but the subtitles
+  read "fat-ass" as one word that is not on the list. Now the subtitles split it the same way, so
+  they lose or swap only what the sound does: "He ran his fat mouth", or with "Speak a clean word",
+  "He ran his fat-butt mouth". Such a word is also no longer asked about as a conflict (heard by
+  Whisper, "not in the subtitles"). A word on the list as a whole ("fucked-up", "dumb-ass") is still
+  removed whole, and ordinary hyphenated words ("well-known") and bleeped spellings ("f**k-ing")
+  are left alone. Checked on 1,487 subtitle files: 747 lines lose a swear they used to keep, and no
+  other line changes.
+- "Cock-a-doodle-doo" is no longer muted, in the sound or in the subtitles.
+
 ## 1.5.1 - 2026-10-19
 
 ### Added
