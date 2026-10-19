@@ -26,7 +26,7 @@ import argparse, bisect, gc, hashlib, json, os, re, secrets, shutil, subprocess,
 from collections import Counter
 from pathlib import Path
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 HERE = Path(__file__).resolve().parent
 
 # --- make the pip-installed CUDA DLLs visible (Windows) ---
@@ -97,6 +97,7 @@ boners
 dildo*
 hardon*
 deepthroat*
+buttsex
 
 [phrases]
 # Several words on a line: muted from the first word to the last, when said together.
@@ -117,6 +118,7 @@ jacks off
 jacked off
 jacking off
 deep throat*
+butt sex
 
 [censored]
 # Advanced. Speech-to-text sometimes writes a swear word bleeped, like f*** or s**t.
@@ -919,7 +921,7 @@ def cue_hits(text):
     return [label for _, _, label in cue_scan(text)[1]]
 
 
-def clean_cue(text, spoken=None):
+def clean_cue(text, spoken=None, keep=(), delete=()):
     """One subtitle cue with its profanity deleted. -> (new text, '' if nothing is left; words deleted)
 
     The words are simply removed. A deleted word hands its sentence-ending punctuation to the word
@@ -927,14 +929,24 @@ def clean_cue(text, spoken=None):
     there ("Damn it." -> "It."). Lines and cues with no words left are dropped.
     spoken = {hit number in this cue: clean word said in its place}: those are swapped, not deleted
     ("Fuck no." -> "Heck no.").
+    From the transcript review: keep = hit numbers left as they are; delete = phrases ([tok, ...]) deleted too.
     """
     pieces, hits = cue_scan(text)
+    hits = [(h, x) for h, x in enumerate(hits) if h not in keep]       # numbered by their place in cue_scan
+    toks = [norm(TAGS.sub("", p))[1] for _, p in pieces]
+    taken = {x[0] + k for _, x in hits for k in range(x[1])}
+    for phrase in delete:
+        n = len(phrase)
+        i = next((i for i in range(len(toks) - n + 1) if toks[i:i + n] == list(phrase) and not taken & set(range(i, i + n))), None)
+        if i is not None:
+            hits.append((None, (i, n, " ".join(phrase))))
+            taken |= set(range(i, i + n))
     if not hits:
         return text, 0
     spoken = spoken or {}
-    swap = {i: (n, spoken[h]) for h, (i, n, _) in enumerate(hits) if h in spoken}
+    swap = {i: (n, spoken[h]) for h, (i, n, _) in hits if h in spoken}
     absorbed = {i + k for i, (n, _) in swap.items() for k in range(1, n)}     # the rest of a swapped phrase
-    drop = {i + k for h, (i, n, _) in enumerate(hits) if h not in spoken for k in range(n)}
+    drop = {i + k for h, (i, n, _) in hits if h not in spoken for k in range(n)}
     kept = []                # [line number, lead tags, body, trail tags] of the words that stay
     carry, capitalize = "", False   # tags/quotes owed to the next kept word; capitalize it?
     for i, (line, piece) in enumerate(pieces):
@@ -1006,15 +1018,45 @@ def spoken_in_cues(cues, said):
     return out
 
 
-def clean_srt(cues, spoken=None):
+def picks_in_cues(cues, picks):
+    """The transcript review's changes, as they apply to the subtitles: a kept word stays in its line, a muted
+    phrase is deleted from it. The line is the one nearest the time (up to 1.5 s off, as in spoken_in_cues).
+    -> {cue number: ({hit numbers kept}, [[tok, ...] deleted, ...])}"""
+    out = {}
+    key = lambda x: re.sub(r"[^a-z]", "", x.lower())
+    near = lambda t: [k for _, k in sorted((max(cs - t, t - ce, 0), k) for k, (cs, ce, _) in enumerate(cues)
+                                           if cs - 1.5 <= t <= ce + 1.5)]
+    for s, e, word in picks.get("keep", []):
+        heard = key(word)
+        for k in near(s):
+            kept = out.setdefault(k, (set(), []))[0]
+            h = next((h for h, (_, _, label) in enumerate(cue_scan(cues[k][2])[1]) if h not in kept and heard and key(label)
+                      and (heard[:4] in key(label) or key(label)[:4] in heard)), None)
+            if h is not None:
+                kept.add(h)
+                break
+    for s, e, words in picks.get("mute", []):
+        phrase = [tok for tok in (norm(w)[1] for w in words.split()) if tok]
+        for k in near(s):
+            toks = [norm(TAGS.sub("", p))[1] for _, p in cue_scan(cues[k][2])[0]]
+            if phrase and any(toks[i:i + len(phrase)] == phrase for i in range(len(toks))):
+                out.setdefault(k, (set(), []))[1].append(phrase)
+                break
+    return out
+
+
+def clean_srt(cues, spoken=None, picks=None):
     """-> (text of a subtitle file with the profanity deleted, words deleted, cues dropped as empty)
-    spoken = {(cue number, hit number): clean word} from spoken_in_cues(): those words are swapped in instead."""
+    spoken = {(cue number, hit number): clean word} from spoken_in_cues(): those words are swapped in instead.
+    picks = the transcript review's changes (see apply_picks): kept words stay, muted phrases go too."""
     def t(x):
         ms = max(0, round(x * 1000))
         return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
     blocks, deleted, dropped = [], 0, 0
+    changes = picks_in_cues(cues, picks) if picks else {}
     for k, (cs, ce, text) in enumerate(cues):
-        new, n = clean_cue(text, {h: w for (c, h), w in (spoken or {}).items() if c == k})
+        keep, delete = changes.get(k, ((), ()))
+        new, n = clean_cue(text, {h: w for (c, h), w in (spoken or {}).items() if c == k}, keep, delete)
         deleted += n
         if new:
             blocks.append(f"{len(blocks) + 1}\n{t(cs)} --> {t(ce)}\n{new}\n")
@@ -1492,6 +1534,30 @@ def load_review(path, src):
     return state
 
 
+def review_mutes(state):
+    """What a saved analysis mutes, with the answers given since (before any changes made in the transcript).
+    -> (hits [(start, end, text, tag)], conflict lines for the log, {unresolved index: what was decided})"""
+    answers = state.get("answers", {})
+    more, resolved = resolve_conflicts(state["pending"], {int(k): v for k, v in answers.get("conflicts", {}).items()})
+    unmute, decided = apply_unresolved(state["questions"], {int(k): v for k, v in answers.get("unresolved", {}).items()})
+    return sorted([tuple(h) for h in state["hits"]] + more + unmute), sorted(state["conflict_lines"] + resolved), decided
+
+
+PICKED = "you picked it in the transcript"   # the tag of a spot muted from the transcript review
+
+
+def apply_picks(hits, picks):
+    """The changes made in the transcript: picks = {"mute": [[start, end, words], ...], "keep": [[start, end, word], ...]}.
+    A kept word un-mutes every spot it overlaps; a picked one is muted where Whisper heard it.
+    -> (hits, lines for the log)"""
+    keep, mute = [tuple(k) for k in picks.get("keep", [])], [tuple(m) for m in picks.get("mute", [])]
+    out = [h for h in hits if not any(h[0] < k[1] and k[0] < h[1] for k in keep)]
+    out += [(s, e, text, PICKED) for s, e, text in mute]
+    lines = sorted([f"{stamp(s)}  {text}  ->  muted (you picked it)" for s, e, text in mute] +
+                   [f"{stamp(s)}  {text}  ->  kept (you un-muted it)" for s, e, text in keep])
+    return sorted(out), lines
+
+
 def drop_review(path):
     """After the clean copy is written, its saved analysis and clips are no longer needed."""
     shutil.rmtree(review_clips(path), ignore_errors=True)
@@ -1591,8 +1657,32 @@ def analyse(a, src, out, out_srt, model_name, rules, later, clips):
         pending, questions = [], []
     state = dict(words=[list(w) for w in words], cues=[list(c) for c in cues], usable=bool(usable_cues), notes=notes,
                  hits=[list(h) for h in hits], conflict_lines=conflict_lines, unresolved=[list(u) for u in unresolved],
-                 decided=decided, pending=pending, questions=questions, out_srt=str(out_srt), model=model_name)
+                 decided=decided, pending=pending, questions=questions, out_srt=str(out_srt), model=model_name, say=[])
+    if later and a.speak and not a.no_separate:
+        model = None                  # Whisper is done: the graphics card is for Gemma now
+        gc.collect()
+        state["say"] = choose_clean_words(state, usable_cues)
     return state, model
+
+
+def choose_clean_words(state, usable_cues):
+    """With "Speak a clean word", while listening for later: Gemma's clean word for every swear that could be
+    spoken (the conflicts as if muted), so the transcript review can show them and you can change them.
+    -> [[start, end, swear, clean word, chosen by], ...]; [] when they cannot be chosen now (then: when writing)."""
+    import torch
+    if not torch.cuda.is_available():
+        return []
+    torch.cuda.empty_cache()
+    import speak
+    spots = sorted([tuple(h[:3]) for h in state["hits"]] + [(p["where"][0], p["where"][1], p["text"]) for p in state["pending"]])
+    sentences = speak.plan_sentences([(s, e, w, n) for n, (s, e, w) in enumerate(spots)], state["words"], usable_cues)
+    try:
+        speak.choose_words(sentences, sys.modules[__name__])
+    except Exception as e:
+        print(f"    The clean words could not be chosen now ({first_line(e)}); they will be when the clean copy is written.")
+        return []
+    return [[s["hit"][j][0], s["hit"][j][1], " ".join(w[2] for w in s["words"][f:l + 1]), s["picks"][j], s["chosen_by"][j]]
+            for s in sentences if not s["muted"] and s.get("picks") for j, (f, l) in enumerate(s["swears"])]
 
 
 # ---------------------------------------------------------------- main
@@ -1678,12 +1768,12 @@ def main():
     if later and review_is_current(a.review_file, settings):
         print("Already analysed in an earlier batch: using that, and any answers you gave.")
         return
+    picked_lines, picks = [], {}
     if a.from_review:
         state, model = load_review(a.from_review, src), None
-        more, resolved = resolve_conflicts(state["pending"], {int(k): v for k, v in state["answers"]["conflicts"].items()})
-        unmute, decided = apply_unresolved(state["questions"], {int(k): v for k, v in state["answers"]["unresolved"].items()})
-        hits = sorted([tuple(h) for h in state["hits"]] + more + unmute)
-        conflict_lines = sorted(state["conflict_lines"] + resolved)
+        hits, conflict_lines, decided = review_mutes(state)
+        picks = state.get("picks") or {}
+        hits, picked_lines = apply_picks(hits, picks)
         if state["questions"]:
             state["decided"] = decided
         state.update(hits=hits, conflict_lines=conflict_lines)
@@ -1735,7 +1825,7 @@ def main():
     # subtitles with the same words deleted, written next to the clean copy once that exists
     srt_text = None
     if cues and merged and not a.dry:
-        srt_text, deleted, dropped = clean_srt(cues)
+        srt_text, deleted, dropped = clean_srt(cues, picks=picks)
         notes.append(f"Clean subtitles: {out_srt} ({deleted} word(s) deleted, {dropped} line(s) dropped as empty).")
 
     with open(log, "w", encoding="utf-8") as f:
@@ -1747,8 +1837,12 @@ def main():
             f.write("\nUNRESOLVED - in the subtitles but not heard in the audio. "
                     + ("Not muted unless the line says so; check by ear:\n" if decided else "NOT muted, check by ear:\n")
                     + "\n".join(unresolved_lines) + "\n")
+        if picked_lines:
+            f.write("\nTRANSCRIPT - your changes in the transcript review:\n" + "\n".join(picked_lines) + "\n")
         f.write("\n" + "\n".join(notes) + "\n")
     print(f"Found {len(merged)} spots to mute. Log: {log}")
+    if picked_lines:
+        print(f"    {len(picked_lines)} change(s) from your transcript review.")
     for line in conflict_lines:
         print(f"    CONFLICT   {line}")
     for line in unresolved_lines:
@@ -1774,9 +1868,12 @@ def main():
         if a.speak and not trouble:
             import speak
             span_of = lambda s, e: next(i for i, m in enumerate(merged) if m[0] <= s + 1e-6 and e <= m[1] + 1e-6)
-            sentences = speak.plan_sentences([(s, e, w, span_of(s, e)) for s, e, w, _ in hits], words, usable_cues)
+            sentences = speak.plan_sentences([(s, e, w, span_of(s, e)) for s, e, w, tag in hits if tag != PICKED],
+                                             words, usable_cues)   # a word you picked in the transcript is muted, not replaced
+            # chosen before: Gemma's while listening, yours in the transcript review (only the rest are asked now)
+            chosen = [(s, e, w, by) for s, e, _, w, by in state.get("say", [])] +                      [(s, e, w, "you") for s, e, _, w in picks.get("say", [])]
             try:   # Gemma has the graphics card to itself here, between Whisper and the voice model
-                speak.choose_words(sentences, sys.modules[__name__])
+                speak.choose_words(sentences, sys.modules[__name__], chosen)
                 speaking = dict(sentences=sentences, words=words, model=model_name, device=a.device)
             except Exception as e:
                 trouble = f"The clean words could not be chosen ({first_line(e)}); the words were muted instead."
@@ -1802,14 +1899,15 @@ def main():
             result = s.get("result") or ("muted: " + s["muted"] if s["muted"] else "muted")
             said += result.startswith("spoken")
             line = speak.marked(s, s.get("picks")) if result.startswith("spoken") else speak.marked(s)
-            spoken_lines.append(f"{stamp(s['hit'][0][0])}  {result}  |  {line}")
+            yours = " (your word)" if result.startswith("spoken") and "you" in (s.get("chosen_by") or []) else ""
+            spoken_lines.append(f"{stamp(s['hit'][0][0])}  {result}{yours}  |  {line}")
         how += f" Spoken clean words: {said} of {len(speaking['sentences'])} sentence(s); the rest stay muted."
         print(f"    Spoke the clean word(s) in {said} of {len(speaking['sentences'])} sentence(s).")
         if srt_text is not None and usable_cues:     # the subtitles say the clean word too, where it was spoken
             swapped = spoken_in_cues(usable_cues, [(s["hit"][j][0], " ".join(w[2] for w in s["words"][f:l + 1]), s["picks"][j])
                                                    for s in speaking["sentences"] if (s.get("result") or "").startswith("spoken")
                                                    for j, (f, l) in enumerate(s["swears"])])
-            srt_text = clean_srt(usable_cues, swapped)[0]
+            srt_text = clean_srt(usable_cues, swapped, picks)[0]
             how += f" Clean subtitles: {len(swapped)} spoken word(s) written in place of the swear."
     with open(log, "a", encoding="utf-8") as f:
         f.write((trouble + "\n" if trouble else "") + how + "\n")

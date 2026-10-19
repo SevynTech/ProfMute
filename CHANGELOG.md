@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.5.0 - 2026-10-19
+
+### Added
+
+- **Review the transcript before writing.** A new option, off by default: "Let me review the
+  transcript before writing". After the listening and your answers, a window shows the movie's
+  whole dialogue as the clean copy will have it, with every muted word masked (`f*****`), so a
+  swear you can still read was missed. Click any word to mute it, drag across several and press
+  **Mute selected** for a phrase, or click a muted word to keep it in this movie. Search the whole
+  transcript (muted words only when you tick "Include muted words"), and click a time to hear the
+  line. The clean copy and the clean subtitles follow your
+  changes, and the log lists them under `TRANSCRIPT`. In a batch the transcripts come after the
+  questions, so the batch still runs unattended before and after.
+- **Choose the spoken words yourself.** With "Speak a clean word", the transcript shows the clean
+  word that will be said in place of each swear, in purple. Right-click one to type your own word,
+  to just mute that spot, or to go back to the AI's word. The clean copy is written with exactly
+  those words (the log marks yours "your word"). Your words go through the same checks as the AI's:
+  a shout, or a word that does not come out clearly, is muted instead.
+
+### Changed
+
+- With "Speak a clean word", when a movie is listened to first and written later (the transcript
+  review, or a batch's three rounds), the AI chooses the clean words while listening, so you can see
+  them; the writing then uses them without asking the AI again.
+- The check that the spoken clean word was really said ignores spaces, hyphens and small spelling
+  differences ("fiddle sticks" for "fiddlesticks"), so an unusual word is not muted for nothing. The
+  check that no swear is left is as strict as before.
+- "Butt sex" (and "buttsex") is in the word list. An existing `words.txt` is not changed.
+
 ## 1.4.1 - 2026-10-18
 
 ### Added

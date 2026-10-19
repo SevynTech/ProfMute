@@ -6,7 +6,7 @@ It runs profmute.py as a separate process (one per movie) and shows its output, 
 command line version does applies here too. The word list (words.txt) and the model list
 (models.txt) sit next to this file and are meant to be edited.
 """
-import codecs, hashlib, json, os, queue, re, shutil, subprocess, sys, threading, time
+import bisect, codecs, hashlib, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time
 import tkinter as tk
 from collections import Counter
 from pathlib import Path
@@ -43,6 +43,12 @@ ASK_TIP = ("A conflict is a word Whisper heard that the subtitles do not have.\n
            "On: you decide each one, hearing it first.\n"
            "Off: you are never asked. Three listens decide, and the word is muted only if "
            "two of them hear it in the same place.")
+TRANSCRIPT_TIP = ("On: before a clean copy is written, you get the movie's whole transcript to check, as the clean copy "
+                  "will have it: every muted word shows as f*****, so a swear you can still read was missed.\n\n"
+                  "Click a word to mute it (or drag across several and press Mute selected), click a muted word to "
+                  "keep it in this movie, search for any word, and click a time to hear that line.\n\n"
+                  "In a batch the transcripts come after the questions, before the clean copies are written, so the "
+                  "batch can still run while you are away.")
 LATER_TIP = ("On: a batch runs in three rounds, so it can run while you are away:\n"
              "1. Every movie is listened to and checked, without asking anything.\n"
              "2. All the questions about all the movies (conflicts and unresolved words, if you chose to be asked) "
@@ -368,6 +374,409 @@ class Tooltip:
         self.timer = self.tip = None
 
 
+HIDDEN = "\u200b"   # zero width: keeps the place of a word the transcript does not show
+
+
+def mask(word):
+    """A muted word as the transcript shows it: its first letter, the rest as stars ("f******,"). Same length."""
+    out, first = [], True
+    for ch in word:
+        if ch.isalnum():
+            out.append(ch if first else "*")
+            first = False
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def transcript_lines(words):
+    """Whisper's words grouped into lines to read: a new line after a pause, after a sentence of six words or
+    more, or after sixteen words. -> [[word index, ...], ...]"""
+    lines, line = [], []
+    for i, (s, e, text) in enumerate(words):
+        if line and (s - words[line[-1]][1] > 1.0 or len(line) >= 16 or
+                     (len(line) >= 6 and words[line[-1]][2].rstrip('"\')').endswith((".", "?", "!")))):
+            lines.append(line)
+            line = []
+        line.append(i)
+    if line:
+        lines.append(line)
+    return lines
+
+
+class Transcript:
+    """The last check before a clean copy is written: the movie's dialogue as Whisper heard it, as the clean copy
+    will have it. A muted word shows masked ("f******"), so a swear that can be read plainly is one that was missed.
+    Click a word to mute it, or a muted one to keep it; drag across several words and press "Mute selected" for a
+    phrase; search; click a time to hear that line from the movie. done(data) gets the saved analysis back with
+    the changes ("picks") in it."""
+
+    def __init__(self, app, job, data, done):
+        self.app, self.job, self.data, self.done = app, job, data, done
+        self.words = [tuple(w[:3]) for w in data["words"]]
+        starts = [w[0] for w in self.words]
+
+        def under(spans):   # the words each stretch of time covers
+            out = set()
+            for s, e, *_ in spans:
+                k = max(0, bisect.bisect_right(starts, s) - 1)
+                while k < len(self.words) and self.words[k][0] < e:
+                    if self.words[k][1] > s:
+                        out.add(k)
+                    k += 1
+            return out
+        self.listed = under(profmute.review_mutes(data)[0])
+        picks = data.get("picks") or {}
+        self.kept = under(picks.get("keep", [])) & self.listed
+        self.picked = under(picks.get("mute", []))
+        # "Speak a clean word": what will be said instead of each swear, the AI's word or yours ("" = just mute it)
+        yours = {(round(x[0], 2), round(x[1], 2)): x[3] for x in picks.get("say", [])}
+        self.says = []        # [word indexes, swear, the AI's word, your word or None, start, end]
+        for s, e, swear, word, by in data.get("say", []):
+            covered = sorted(under([(s, e)]))
+            if covered:
+                self.says.append([covered, swear, word, yours.get((round(s, 2), round(e, 2))), s, e])
+        self.say_of = {i: n for n, g in enumerate(self.says) for i in g[0]}
+        self.lines = transcript_lines(self.words)
+        self.first = {line[0] for line in self.lines}
+        self.found, self.current, self.word_win = [], -1, None
+
+        dark = app.dark.get()
+        win = self.win = tk.Toplevel(app.root)
+        win.title(f"ProfMute - transcript of {job['title']}")
+        win.geometry(f"{min(1100, app.root.winfo_screenwidth() - 80)}x{min(760, app.root.winfo_screenheight() - 120)}")
+        win.minsize(640, 400)
+        if dark:
+            win.configure(background=DARK["bg"])
+        box = ttk.Frame(win, padding=12)
+        box.pack(fill="both", expand=True)
+        ttk.Label(box, text=job["title"], style="Big.TLabel").pack(anchor="w")
+        ttk.Label(box, style="Hint.TLabel", wraplength=1000, justify="left", text=(
+            "The dialogue as the clean copy will have it: muted words show as f*****, so a swear you can read "
+            "plainly here was missed. Click a word to mute it, or click a muted word to keep it in this movie. "
+            "For several words, drag across them and press Mute selected. Click a time to hear that line." +
+            (" Purple words will be said in place of a swear: right-click one to choose another word, or to just "
+             "mute it." if self.says else ""))).pack(anchor="w", pady=(2, 8))
+
+        find = ttk.Frame(box)
+        find.pack(fill="x", pady=(0, 6))
+        ttk.Label(find, text="Find").pack(side="left")
+        self.query = tk.StringVar()
+        entry = ttk.Entry(find, textvariable=self.query, width=34)
+        entry.pack(side="left", padx=6)
+        entry.bind("<Return>", lambda e: self.step(1))
+        entry.bind("<Shift-Return>", lambda e: self.step(-1))
+        self.query.trace_add("write", lambda *_: self.search())
+        ttk.Button(find, text="Previous", command=lambda: self.step(-1)).pack(side="left")
+        ttk.Button(find, text="Next", command=lambda: self.step(1)).pack(side="left", padx=6)
+        self.count = tk.StringVar()
+        ttk.Label(find, textvariable=self.count).pack(side="left", padx=6)
+        self.find_muted = tk.BooleanVar(value=False)
+        also = ttk.Checkbutton(find, text="Include muted words", variable=self.find_muted, command=self.search)
+        also.pack(side="right")
+        Tooltip(also, "Off: the search skips muted words, so it only finds what will still be heard in the clean "
+                      "copy, which is where a missed word hides.\nOn: it finds muted words too, for one to keep.")
+
+        middle = ttk.Frame(box)
+        middle.pack(fill="both", expand=True)
+        colors = dict(bg=DARK["field"], fg=DARK["fg"]) if dark else dict(bg="white", fg="black")
+        text = self.text = tk.Text(middle, wrap="word", font=("Segoe UI", 11), cursor="arrow", padx=10, pady=8,
+                                   background=colors["bg"], foreground=colors["fg"], insertbackground=colors["fg"],
+                                   relief="flat", highlightthickness=0, spacing1=2, spacing3=2)
+        scroll = ttk.Scrollbar(middle, command=text.yview)
+        scroll.pack(side="right", fill="y")
+        text.pack(side="left", fill="both", expand=True)
+        text.configure(yscrollcommand=scroll.set)
+        pick = (lambda d, l: d if dark else l)
+        text.tag_configure("time", foreground=pick("#8b949e", "#6b7280"), font=("Consolas", 10))
+        text.tag_configure("listed", foreground=pick("#7aa2f7", "#1d4ed8"))
+        text.tag_configure("picked", foreground=pick("#4ade80", "#15803d"), underline=True)
+        text.tag_configure("kept", foreground=pick("#fbbf24", "#b45309"), underline=True)
+        text.tag_configure("spoken", foreground=pick("#c084fc", "#7e22ce"))
+        text.tag_configure("found", background=pick("#5b4a12", "#fde68a"))
+        text.tag_configure("current", background=pick("#a16207", "#facc15"))
+        text.tag_raise("current")
+        text.tag_bind("time", "<Enter>", lambda e: text.configure(cursor="hand2"))
+        text.tag_bind("time", "<Leave>", lambda e: text.configure(cursor="arrow"))
+        text.bind("<ButtonRelease-1>", self.clicked)
+        text.bind("<Button-3>", self.right_clicked)
+
+        bottom = ttk.Frame(box)
+        bottom.pack(side="bottom", fill="x", pady=(8, 0), before=middle)   # its room first: the transcript gets the rest
+        legend = ttk.Frame(bottom)
+        legend.pack(fill="x")
+        for label, tag in (("muted by the word list or your answers", "listed"), ("muted by you", "picked"),
+                           ("kept by you", "kept")) + ((("said instead (right-click to change)", "spoken"),) if self.says else ()):
+            sample = tk.Label(legend, text="■ " + label, foreground=text.tag_cget(tag, "foreground"),
+                              background=DARK["bg"] if dark else app.light_bg)
+            sample.pack(side="left", padx=(0, 14))
+        actions = ttk.Frame(bottom)
+        actions.pack(fill="x", pady=(6, 0))
+        self.summary = tk.StringVar()
+        ttk.Label(actions, textvariable=self.summary).pack(side="left")
+        ttk.Button(actions, text="Done", command=self.finish).pack(side="right")
+        self.mute_btn = ttk.Button(actions, text="Mute selected", command=self.mute_selected)
+        self.mute_btn.pack(side="right", padx=6)
+        Tooltip(self.mute_btn, "Mute the words you dragged across, as one phrase.")
+        win.protocol("WM_DELETE_WINDOW", self.finish)
+        app.title_bar(win)
+        self.render()
+        entry.focus_set()
+
+    # ---- what each word shows
+    def muted(self, i):
+        return (i in self.listed and i not in self.kept) or i in self.picked
+
+    def spoken(self, g):
+        """A swear will be said instead only while all its words are still muted as the list or your answers had it."""
+        return all(k in self.listed and k not in self.kept and k not in self.picked for k in g[0])
+
+    def look(self, i):
+        tag = "picked" if i in self.picked else "kept" if i in self.kept else "listed" if i in self.listed else None
+        word = self.words[i][2]
+        shown = mask(word) if self.muted(i) else word
+        g = self.says[self.say_of[i]] if i in self.say_of else None
+        if g and self.spoken(g) and (g[2] if g[3] is None else g[3]):
+            if i != g[0][0]:
+                return HIDDEN, "spoken"       # the clean word stands for the whole swear, shown once
+            said = g[2] if g[3] is None else g[3]
+            shown, tag = said + re.search(r"[^\w']*$", self.words[g[0][-1]][2]).group(), "spoken"
+        return shown, tag
+
+    def gap(self, i, shown):
+        """The space before word i: none before a line's first word, or before one hidden in a clean word."""
+        return HIDDEN if i in self.first or shown == HIDDEN else " "
+
+    def render(self):
+        t = self.text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        for n, line in enumerate(self.lines):
+            t.insert("end", profmute.stamp(self.words[line[0]][0])[:8], ("time", f"line{n}"))
+            t.tag_bind(f"line{n}", "<Button-1>", lambda e, n=n: self.play(n))
+            t.insert("end", " ")
+            for i in line:
+                shown, tag = self.look(i)
+                t.insert("end", self.gap(i, shown), (f"s{i}",))
+                t.insert("end", shown, (f"w{i}",) + ((tag,) if tag else ()))
+            t.insert("end", "\n")
+        t.configure(state="disabled")
+        self.tell()
+
+    def redraw(self, i):
+        t = self.text
+        shown, tag = self.look(i)
+        t.configure(state="normal")
+        start, end = t.tag_ranges(f"w{i}")
+        t.delete(start, end)
+        t.insert(start, shown, (f"w{i}",) + ((tag,) if tag else ()))
+        start, end = t.tag_ranges(f"s{i}")
+        t.delete(start, end)
+        t.insert(start, self.gap(i, shown), (f"s{i}",))
+        t.configure(state="disabled")
+
+    def refresh(self, i):
+        """Show word i again, with the rest of its swear when a clean word stands for it."""
+        for k in (self.says[self.say_of[i]][0] if i in self.say_of else [i]):
+            self.redraw(k)
+
+    def tell(self):
+        muted = sum(self.muted(i) for i in range(len(self.words)))
+        chosen = sum(g[3] is not None for g in self.says)
+        self.summary.set(f"{muted} word(s) muted   ·   you: {len(self.picked)} muted, {len(self.kept)} kept"
+                         + (f", {chosen} word(s) chosen" if self.says else ""))
+
+    # ---- changing it
+    def word_at(self, index):
+        for tag in self.text.tag_names(index):
+            if tag.startswith("w") and tag[1:].isdigit():
+                return int(tag[1:])
+        return None
+
+    def clicked(self, event):
+        if self.text.tag_ranges("sel"):   # dragged across words: "Mute selected" does those
+            return
+        i = self.word_at(f"@{event.x},{event.y}")
+        if i is not None:
+            self.toggle(i)
+
+    def toggle(self, i):
+        """One word: mute it, or keep it if it is muted; again to undo."""
+        if i in self.picked:
+            self.picked.discard(i)
+        elif i in self.kept:
+            self.kept.discard(i)
+        elif i in self.listed:
+            self.kept.add(i)
+        else:
+            self.picked.add(i)
+        self.refresh(i)
+        self.tell()
+
+    def mute_selected(self):
+        sel = self.text.tag_ranges("sel")
+        if not sel:
+            return
+        start, end = sel
+        chosen = {i for i in range(len(self.words)) if self.text.tag_ranges(f"w{i}")
+                  and self.text.compare(self.text.tag_ranges(f"w{i}")[1], ">", start)
+                  and self.text.compare(self.text.tag_ranges(f"w{i}")[0], "<", end)}
+        for i in sorted(chosen):
+            if i in self.listed:
+                self.kept.discard(i)
+            else:
+                self.picked.add(i)
+            self.refresh(i)
+        self.text.tag_remove("sel", "1.0", "end")
+        self.tell()
+
+    def right_clicked(self, event):
+        i = self.word_at(f"@{event.x},{event.y}")
+        if i is not None and i in self.say_of and self.spoken(self.says[self.say_of[i]]):
+            self.choose_word(self.says[self.say_of[i]])
+
+    def choose_word(self, g):
+        """What to say instead of one swear: your word, the AI's, or nothing (just mute it)."""
+        dark = self.app.dark.get()
+        win = tk.Toplevel(self.win)
+        win.title("ProfMute - what to say instead")
+        win.transient(self.win)
+        win.resizable(False, False)
+        if dark:
+            win.configure(background=DARK["bg"])
+        box = ttk.Frame(win, padding=16)
+        box.pack(fill="both", expand=True)
+        ttk.Label(box, text=f"Instead of “{g[1].strip(',.?!')}”, say:", style="Big.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(box, style="Hint.TLabel", text=f"The AI chose “{g[2]}”." if g[2] else "").grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(2, 8))
+        word = tk.StringVar(value=g[3] if g[3] else g[2])
+        entry = ttk.Entry(box, textvariable=word, width=36)
+        entry.grid(row=2, column=0, columnspan=4, sticky="ew")
+        problem = tk.StringVar()
+        ttk.Label(box, textvariable=problem, foreground="#dc2626").grid(row=3, column=0, columnspan=4, sticky="w", pady=(4, 0))
+
+        def done(choice):
+            g[3] = None if choice == g[2] else choice
+            win.destroy()
+            self.refresh(g[0][0])
+            self.tell()
+
+        def use():
+            said = " ".join(word.get().split())
+            if not said:
+                return problem.set("Type a word, or press Just mute it.")
+            try:
+                profmute.use_words(self.app.path(self.app.words) or None)
+            except SystemExit:    # the word list cannot be read: check against the built-in one
+                profmute.RULES = profmute.parse_words(profmute.DEFAULT_WORDS, "built-in list")
+            if profmute.find_hits([(n, n + 0.5, w, *profmute.norm(w)) for n, w in enumerate(said.split())]):
+                return problem.set("That is on your word list: it would be muted again.")
+            done(said)
+        buttons = ttk.Frame(box)
+        buttons.grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
+        for text, command, tip in (("Use this word", use, "It is said in the actor's voice in place of the swear."),
+                                   ("Just mute it", lambda: done(""), "No word is said here: the swear is only muted."),
+                                   ("Use the AI's word", lambda: done(g[2]), "Back to the word the AI chose."),
+                                   ("Cancel", win.destroy, "Change nothing.")):
+            b = ttk.Button(buttons, text=text, command=command)
+            b.pack(side="left", padx=(0, 6))
+            Tooltip(b, tip)
+        entry.bind("<Return>", lambda e: use())
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.app.title_bar(win)
+        win.update_idletasks()
+        x = self.win.winfo_rootx() + (self.win.winfo_width() - win.winfo_width()) // 2
+        y = self.win.winfo_rooty() + (self.win.winfo_height() - win.winfo_height()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        entry.focus_set()
+        entry.select_range(0, "end")
+        self.word_win = win
+
+    # ---- finding
+    def search(self):
+        t, q = self.text, self.query.get().strip().lower()
+        t.tag_remove("found", "1.0", "end")
+        t.tag_remove("current", "1.0", "end")
+        self.found, self.current = [], -1
+        if len(q) >= 2:
+            flat, owner = [], []          # the words as heard, lower case, and the word each letter belongs to
+            for line in self.lines:
+                for i in line:
+                    word = self.words[i][2].lower()
+                    flat.append(word + " ")
+                    owner += [i] * (len(word) + 1)
+                flat.append("\n")
+                owner.append(None)
+            flat = "".join(flat)
+            at = flat.find(q)
+            while at >= 0:
+                hit = sorted({owner[k] for k in range(at, at + len(q)) if owner[k] is not None})
+                if hit and (self.find_muted.get() or not any(self.muted(i) for i in hit)):
+                    self.found.append(hit)
+                    for i in hit:
+                        t.tag_add("found", *t.tag_ranges(f"w{i}"))
+                at = flat.find(q, at + 1)
+        self.count.set(f"{len(self.found)} found" if q else "")
+        if self.found:
+            self.step(1)
+
+    def step(self, direction):
+        if not self.found:
+            return
+        self.current = (self.current + direction) % len(self.found)
+        t = self.text
+        t.tag_remove("current", "1.0", "end")
+        hit = self.found[self.current]
+        for i in hit:
+            t.tag_add("current", *t.tag_ranges(f"w{i}"))
+        t.see(t.tag_ranges(f"w{hit[0]}")[0])
+        self.count.set(f"{self.current + 1} of {len(self.found)}")
+
+    # ---- hearing a line
+    def play(self, n):
+        if not winsound:
+            return
+        line = self.lines[n]
+        start, end = max(0.0, self.words[line[0]][0] - 0.4), self.words[line[-1]][1] + 0.4
+
+        def work():
+            out = os.path.join(tempfile.gettempdir(), "profmute-transcript-line.wav")
+            r = subprocess.run([profmute.FFMPEG, "-v", "error", "-y", "-ss", f"{start:.2f}", "-i", self.job["movie"], "-t",
+                                f"{end - start:.2f}", "-map", "0:a:0", "-ac", "1", "-ar", "22050", out],
+                               capture_output=True, creationflags=NO_WINDOW)
+            if r.returncode == 0:
+                winsound.PlaySound(out, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- done
+    def picks(self):
+        """The changes, as times: picked words that follow each other become one phrase."""
+        mute, run = [], []
+        for i in sorted(self.picked):
+            if run and (i != run[-1] + 1 or self.words[i][0] - self.words[run[-1]][1] > 0.6):
+                mute.append(run)
+                run = []
+            run.append(i)
+        if run:
+            mute.append(run)
+        return {"mute": [[self.words[r[0]][0], self.words[r[-1]][1], " ".join(self.words[i][2] for i in r)] for r in mute],
+                "keep": [[self.words[i][0], self.words[i][1], self.words[i][2]] for i in sorted(self.kept)],
+                "say": [[g[4], g[5], g[1], g[3]] for g in self.says if g[3] is not None]}
+
+    def finish(self):
+        if winsound:
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        self.data["picks"], self.data["transcript_done"] = self.picks(), True
+        self.close()
+        self.done(self.data)
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 class App(ttk.Frame):
     def __init__(self, root):
         super().__init__(root, padding=12)
@@ -396,6 +805,8 @@ class App(ttk.Frame):
         self.later = None        # a three-round batch (listen, ask, write): its jobs, each with its saved analysis
         self.questions = []      # its question round: (job, "conflicts" | "unresolved", question) still to ask
         self.reviewing = None    # and the one asked now
+        self.later_transcript = False   # its transcript round: on or not, the movies still to review, the window open
+        self.transcripts, self.transcript_win = [], None
         self.question_n = self.question_total = 0
         self.model_rows = []
 
@@ -422,6 +833,7 @@ class App(ttk.Frame):
         self.log_beside = tk.BooleanVar(value=bool(settings.get("log_beside", True)))
         self.confirm = tk.BooleanVar(value=bool(settings.get("confirm", True)))
         self.ask_unresolved = tk.BooleanVar(value=bool(settings.get("ask_unresolved", True)))
+        self.review_transcript = tk.BooleanVar(value=bool(settings.get("review_transcript", False)))
         self.fade = tk.BooleanVar(value=bool(settings.get("fade", True)))
         self.dialogue_only = tk.BooleanVar(value=bool(settings.get("dialogue_only", True)))
         self.front_check = tk.BooleanVar(value=bool(settings.get("front_check", True)))
@@ -586,7 +998,9 @@ class App(ttk.Frame):
             (0, 0, "Confirm each word with a second listen", self.confirm, remember("confirm", self.confirm), CONFIRM_TIP),
             (1, 0, "Let me hear and decide unresolved words", self.ask_unresolved,
              remember("ask_unresolved", self.ask_unresolved), UNRESOLVED_TIP),
-            (2, 0, "Preview only: write the log, no video", self.dry, self.dry_changed, PREVIEW_TIP),
+            (2, 0, "Let me review the transcript before writing", self.review_transcript,
+             remember("review_transcript", self.review_transcript), TRANSCRIPT_TIP),
+            (3, 0, "Preview only: write the log, no video", self.dry, self.dry_changed, PREVIEW_TIP),
             (0, 1, "Fade in and out at each mute", self.fade, remember("fade", self.fade), FADE_TIP),
             (1, 1, "Mute only the dialogue channel (surround)", self.dialogue_only,
              remember("dialogue_only", self.dialogue_only), DIALOGUE_TIP),
@@ -1174,7 +1588,11 @@ class App(ttk.Frame):
             cmd += ["--srt", srt]
         if not dry:
             cmd += ["--out", out] + (["--out-srt", out_srt] if out_srt else [])
-        self.run_jobs([{"cmd": cmd, "out": out, "title": os.path.basename(movie)}])
+        jobs = [{"cmd": cmd, "out": out, "title": os.path.basename(movie), "movie": movie}]
+        self.later = None
+        if not dry and self.review_transcript.get():   # listen, ask, show the transcript, then write
+            self.in_rounds(jobs)
+        self.run_jobs(jobs)
 
     def start_batch(self):
         if self.scanning:
@@ -1238,15 +1656,20 @@ class App(ttk.Frame):
             return self.status.set(f"Nothing to do: all {skipped} movie(s) skipped.")
         # listen to every movie first, ask everything together, then write: three rounds (see LATER_TIP)
         self.later = None
-        if not dry and self.batch_later.get() and (self.batch_ask.get() or self.ask_unresolved.get()):
-            REVIEW.mkdir(exist_ok=True)
-            prune_reviews()
-            for j in jobs:
-                path = str(review_file(j["movie"], j["out"]))
-                j.update(review=path, round=1, write_cmd=j["cmd"] + ["--from-review", path],
-                         cmd=j["cmd"] + ["--review-file", path])
-            self.later = jobs[:]
+        if not dry and (self.review_transcript.get() or
+                        self.batch_later.get() and (self.batch_ask.get() or self.ask_unresolved.get())):
+            self.in_rounds(jobs)
         self.run_jobs(jobs, skipped)
+
+    def in_rounds(self, jobs):
+        """Listen to every movie, then the questions and transcripts, then write (see LATER_TIP): each job gets
+        its saved analysis, and the command for each round."""
+        REVIEW.mkdir(exist_ok=True)
+        prune_reviews()
+        for j in jobs:
+            path = str(review_file(j["movie"], j["out"]))
+            j.update(review=path, round=1, write_cmd=j["cmd"] + ["--from-review", path], cmd=j["cmd"] + ["--review-file", path])
+        self.later, self.later_transcript = jobs[:], self.review_transcript.get()
 
     # ------------------------------------------------------------ running
 
@@ -1474,11 +1897,11 @@ class App(ttk.Frame):
         self.question_n, self.question_total = 0, len(self.questions)
         self.review_history, self.review_previous = [], {}   # answered: (question, answer, answered with it, number)
         if not self.questions:
-            return self.write_round()
+            return self.transcript_round()
         movies = len({id(q[0]) for q in self.questions})
         self.write(f"\n===== {self.question_total} question(s) about {movies} movie(s): waiting for you =====\n")
         for j in {id(q[0]): q[0] for q in self.questions}.values():
-            self.show_row(j["iid"], "Waiting for your answers")
+            self.job_row(j, "Waiting for your answers")
         self.set_running(True)
         self.next_question()
 
@@ -1502,10 +1925,10 @@ class App(ttk.Frame):
             self.question_n += len(gone)
         self.review_history.append((self.reviewing, reply, gone, self.question_n - len(gone)))
         if not any(q[0] is job for q in self.questions):
-            self.show_row(job["iid"], "Answered")
+            self.job_row(job, "Answered")
         if self.questions:
             return self.next_question()
-        self.write_round()
+        self.transcript_round()
 
     def review_back(self):
         """Back to the question answered last: its saved answer is taken back, and so are the ones it answered
@@ -1518,8 +1941,40 @@ class App(ttk.Frame):
         self.review_previous[(id(job), part, info["n"])] = reply
         self.questions = [(job, part, info)] + gone + [self.reviewing] + self.questions
         self.question_n = number - 1
-        self.show_row(job["iid"], "Waiting for your answers")
+        self.job_row(job, "Waiting for your answers")
         self.next_question()
+
+    def transcript_round(self):
+        """After the questions: each movie's transcript, to check and change before it is written."""
+        self.reviewing = None
+        self.transcripts = [j for j in self.later if j.get("listened") and self.later_transcript
+                            and not (read_review(j["review"]) or {}).get("transcript_done")]
+        if self.transcripts:
+            self.write(f"\n===== {len(self.transcripts)} transcript(s) to review: waiting for you =====\n")
+            for j in self.transcripts:
+                self.job_row(j, "Transcript to review")
+            self.set_running(True)
+        self.next_transcript()
+
+    def next_transcript(self):
+        if not self.transcripts:
+            return self.write_round()
+        job = self.transcripts.pop(0)
+        data = read_review(job["review"])
+        if data is None:
+            return self.next_transcript()
+        self.status.set(f"Waiting for you: the transcript of {job['title']}")
+        self.job_row(job, "Reviewing the transcript")
+        self.transcript_win = Transcript(self, job, data, lambda data, job=job: self.transcript_done(job, data))
+
+    def transcript_done(self, job, data):
+        self.transcript_win = None
+        profmute.save_review(job["review"], data)
+        picks = data.get("picks") or {}
+        self.write(f"    Transcript of {job['title']}: {len(picks.get('mute', []))} muted by you, "
+                   f"{len(picks.get('keep', []))} kept by you, {len(picks.get('say', []))} word(s) chosen by you\n")
+        self.job_row(job, "Reviewed")
+        self.next_transcript()
 
     def write_round(self):
         """The last round: every clean copy, written with the answers."""
@@ -1532,14 +1987,26 @@ class App(ttk.Frame):
         self.run_jobs(jobs, fresh=False)
 
     def stop_review(self):
-        """Cancel during the question round: the answers given so far stay saved."""
+        """Cancel during the question round or the transcripts: the answers and reviewed transcripts so far stay
+        saved (a transcript open now is not)."""
         self.close_ask()
-        for j in {id(q[0]): q[0] for q in [self.reviewing] + self.questions}.values():
-            self.show_row(j["iid"], "Waiting for your answers")
-        self.reviewing, self.questions, self.later = None, [], None
-        self.status.set("Stopped. Your answers so far are saved: start the same batch again to carry on.")
+        for j in {id(q[0]): q[0] for q in ([self.reviewing] if self.reviewing else []) + self.questions}.values():
+            self.job_row(j, "Waiting for your answers")
+        if self.transcript_win:
+            self.job_row(self.transcript_win.job, "Transcript to review")
+            self.transcript_win.close()
+        for j in self.transcripts:
+            self.job_row(j, "Transcript to review")
+        self.reviewing, self.questions, self.later, self.transcripts, self.transcript_win = None, [], None, [], None
+        again = "the same batch" if self.tabs.index("current") == 1 else "again"
+        self.status.set(f"Stopped. Your answers so far are saved: start {again} to carry on.")
         self.write(f"\n===== {self.status.get()} =====\n")
         self.set_running(False)
+
+    def job_row(self, job, status):
+        """A batch movie's row in the list; a single movie has none."""
+        if job.get("iid"):
+            self.show_row(job["iid"], status)
 
     # ------------------------------------------------------------ finishing
 
@@ -1582,9 +2049,10 @@ class App(ttk.Frame):
                 return self.next_job()
             for waiting in self.jobs:
                 self.show_row(waiting["iid"], "Not run")
-            if listening and not self.cancelled and self.later:
-                self.jobs, self.job = [], None
-                return self.start_review()
+        if listening and not self.cancelled and self.later and (batch or outcome == "done"):   # on to the questions
+            self.jobs, self.job = [], None
+            return self.start_review()
+        if batch:
             return self.batch_done()
         self.status.set({"cancelled": "Cancelled.", "done": "Done.",
                          "failed": "Something went wrong - see the messages below."}[outcome])
@@ -1617,7 +2085,7 @@ class App(ttk.Frame):
         self.cancel_btn.configure(state="normal" if running else "disabled")
 
     def cancel(self):
-        if self.reviewing:
+        if self.reviewing or self.transcript_win:
             return self.stop_review()
         if self.proc:
             self.cancelled = True

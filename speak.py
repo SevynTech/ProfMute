@@ -237,6 +237,22 @@ def instruction(s, calm=False):
     return text
 
 
+def _said(word, heard):
+    """Did Whisper hear the clean word in dots.tts's sentence? Spaces, hyphens, punctuation and capitals do not
+    count ("fiddlesticks" / "fiddle sticks", "son-of-a-gun"), and a longer word may be spelled a little differently
+    ("goodness" / "good ness" / "goodnes"). Whole words only: "heck" is not found in "check"."""
+    import difflib
+    want = re.sub(r"[^a-z]", "", word.lower())
+    got = [re.sub(r"[^a-z]", "", w[2].lower()) for w in heard]
+    for k in range(len(got)):
+        joined = ""
+        for piece in got[k:k + 6]:
+            joined += piece
+            if joined == want or (len(want) >= 6 and difflib.SequenceMatcher(None, joined, want).ratio() >= 0.85):
+                return True
+    return False
+
+
 def _yell(x16, heard, picks):
     """Did dots.tts yell a clean word? Measured on its sentence (16 kHz), each word found by Whisper's timing:
     pitch YELL_HZ or higher, or no pitch at all while loud (a harsh yell; a whisper or a gravelly voice has no pitch
@@ -349,13 +365,17 @@ def extract(line, rewritten):
     return [rewritten[keep[m.start(g)][0]:keep[m.end(g) - 1][0] + 1] for g in range(1, m.lastindex + 1)]
 
 
-def choose_words(sentences, pm):
-    """Fill s["picks"] (a clean word or phrase per swear) for every sentence to be spoken."""
+def choose_words(sentences, pm, fixed=()):
+    """Fill s["picks"] (a clean word or phrase per swear) for every sentence to be spoken.
+    fixed = [(start, end, word, chosen by), ...]: words chosen before, matched to a swear by its time: yours from
+    the transcript ("you"; "" means just mute it) win over the word list's, which win over Gemma's from the
+    listening; Gemma is asked only about the rest."""
     global PM
     PM = pm
     todo = [s for s in sentences if not s["muted"]]
     if not todo:
         return
+    match = lambda hit, mine: next((f for f in fixed if (f[3] == "you") == mine and f[0] < hit[1] and hit[0] < f[1]), None)
 
     def default(swear):
         tok = letters(swear).replace("'", "")
@@ -378,6 +398,15 @@ def choose_words(sentences, pm):
         swears = [" ".join(w[2] for w in s["words"][f:l + 1]) for f, l in s["swears"]]
         s["picks"] = [pm.RULES.replacement(sw) for sw in swears]       # the word list's own choices win
         s["chosen_by"] = ["word list" if p else None for p in s["picks"]]
+        for j, hit in enumerate(s["hit"]):
+            mine, earlier = match(hit, True), match(hit, False)
+            if mine and not mine[2]:
+                s["muted"] = "you chose to just mute it"
+            elif mine:
+                s["picks"][j], s["chosen_by"][j] = mine[2], "you"
+            elif s["picks"][j] is None and earlier:
+                s["picks"][j], s["chosen_by"][j] = earlier[2], earlier[3]
+    todo = [s for s in todo if not s["muted"]]
     ask = [s for s in todo if None in s["picks"]]
     if ask:
         say(f"Choosing clean words for {len(ask)} sentence(s) with Gemma 4 12B...")
@@ -538,8 +567,7 @@ def speak(data, rate, top, dialogue, sentences, spans, voice, whisper_name, devi
                 x16 = torchaudio.functional.resample(torch.from_numpy(s["edited"].astype(np.float32)), rate, 16000).numpy()
                 heard = pm.transcribe(model, x16)
                 text = " ".join(w[2] for w in heard)
-                flat = re.sub(r"[^a-z ]", "", text.lower())
-                ok = not pm.find_hits(heard) and all(re.sub(r"[^a-z ]", "", p.lower()) in flat for p in s["picks"])
+                ok = not pm.find_hits(heard) and all(_said(p, heard) for p in s["picks"])
                 s["yelled"] = False
                 if ok:
                     s["yelled"], note = _yell(x16, heard, s["picks"])

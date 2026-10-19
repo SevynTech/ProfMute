@@ -134,6 +134,8 @@ show up after its next scan.
   [How sure is it?](#how-sure-is-it).
 - **Let me hear and decide unresolved words**: on by default. See
   [How sure is it?](#how-sure-is-it).
+- **Let me review the transcript before writing**: off by default. See
+  [Reviewing the transcript](#reviewing-the-transcript).
 - **Preview only**: writes only the log, so you can see what would be muted.
 - **Fade in and out at each mute**, **Mute only the dialogue channel**, **Check the front
   left/right speakers too**, **Remove only the voice with AI** and **Voice model**: see
@@ -189,7 +191,10 @@ How it works, for each sentence with a swear:
 1. **Choosing the word.** Gemma, an AI language model, reads the sentence and picks a plain, mild
    word that fits it: "heck" in "where the heck", "screw" in "screw you", "freaking" before a word,
    "jerk" for an insult. It never picks made-up sound-alikes like "fudge". Words you set yourself in
-   the word list's `[replacements]` section (see [Word list](#word-list)) always come first.
+   the word list's `[replacements]` section (see [Word list](#word-list)) always come first, and
+   with [Reviewing the transcript](#reviewing-the-transcript) you can see every chosen word before
+   anything is written and change any of them. (When a movie is listened to first and written later,
+   as with the transcript review or a batch's three rounds, the words are chosen while listening.)
 2. **Saying it.** The voice is separated from the music, and dots.tts, an AI speech model, says the
    sentence again with the clean word, copying the actor's voice and delivery. Only the swear is cut
    out and replaced; the words around it stay the actor's own.
@@ -249,6 +254,38 @@ a batch, tick "Ask me about conflicts" for the same question (asked all together
 has been listened to, see [Batch](#batch)), or leave it unticked and three listens decide: the word
 is muted only if two of them hear it in the same place. Without subtitles there are no conflicts;
 everything Whisper hears is muted.
+
+### Reviewing the transcript
+
+A word list cannot know every way a word is used: you may want "butt" and "sex" left alone but
+"butt sex" muted, or "hell" muted except in "a hell of a game". With **Let me review the transcript
+before writing** ticked, you get the last word on every movie before its clean copy is written.
+
+After the listening and your answers, a window shows the movie's whole dialogue as the clean copy
+will have it, line by line with the time each line starts:
+
+- **Muted words show masked**, like `f*****`, in blue. So any swear you can still read plainly is
+  one ProfMute missed.
+- **Click any word to mute it** (it turns green). For several words, drag across them and press
+  **Mute selected**. The word is muted exactly where Whisper heard it.
+- **Click a muted word to keep it** in this movie (it turns orange). Click again to undo.
+- **Find** searches the whole transcript, with **Next** and **Previous**. It skips muted words, since
+  a missed word is one that will still be heard; tick **Include muted words** to find those too
+  (to keep one, for example).
+- **Click a time** to hear that line from the movie.
+- **With "Speak a clean word"**, a swear that will be replaced shows the clean word instead, in
+  purple ("heck"). **Right-click** it to type your own word, to **just mute** that spot, or to go
+  back to the AI's word. Your word still goes through the same checks as the AI's: if the actor
+  shouted, or the spoken word does not come out clearly, that spot is muted instead (the log's
+  `SPOKEN` part says so).
+- **Done** saves your changes. The clean copy and the clean subtitles follow them, and the log lists
+  them under `TRANSCRIPT`.
+
+In a batch the transcripts come after all the questions, before any clean copy is written, so the
+batch can still run while you are away: listen overnight, answer and review in the morning, write
+during the day. For a single movie it works the same way, in the same order. If you stop before
+pressing Done, start again later: the movie is not listened to again, and the transcripts you
+already finished are not asked again.
 
 ### Use good subtitles
 
